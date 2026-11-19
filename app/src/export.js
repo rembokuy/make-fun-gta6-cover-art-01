@@ -1,6 +1,6 @@
-// Neon Coast export: renders the current design at a real post size and saves
-// it as a PNG. The three sizes are the common post sizes — square, portrait
-// and wide — and the "export all" action writes all three in one step.
+// Neon Coast export: renders the current design at a real post size and
+// saves it as a PNG. The three sizes are the common post sizes — square,
+// portrait and wide — and the "export all" action writes all three in one go.
 
 import { renderCover } from './cover.js';
 
@@ -24,7 +24,7 @@ export function exportFileName(w, h) {
   return `neon-coast-${w}x${h}.png`;
 }
 
-/** Renders and downloads one size; resolves once the download was started. */
+/** Renders one size and starts its download; resolves once started. */
 export function downloadCover(design, photos, w, h) {
   return new Promise((resolve) => {
     const canvas = renderCoverCanvas(design, photos, w, h);
@@ -34,12 +34,12 @@ export function downloadCover(design, photos, w, h) {
         return;
       }
       const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = exportFileName(w, h);
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = exportFileName(w, h);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
       setTimeout(() => URL.revokeObjectURL(url), 5000);
       resolve(true);
     }, 'image/png');
@@ -48,7 +48,7 @@ export function downloadCover(design, photos, w, h) {
 
 /**
  * Downloads every export size in one step, one after another so the browser
- * keeps each download. Resolves with the list of file names that were saved.
+ * keeps each download. Resolves with the file names that were saved.
  */
 export async function downloadAllSizes(design, photos, onEach) {
   const saved = [];

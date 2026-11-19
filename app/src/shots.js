@@ -1,19 +1,20 @@
-// Fixed scenes for screenshots: ?shot=editor shows the studio with a sample
-// photo loaded; ?shot=cover shows the cover alone, filling the viewport.
+// Fixed scenes for screenshots: ?shot=editor shows the studio with sample
+// photos loaded; ?shot=cover shows the cover alone, filling the viewport.
 // The query picks the scene: `photos` is a comma list of sample names,
 // `layout` and `grade` pick the look, `title`/`subtitle`/`badge` the words,
 // `aspect` the preview shape, and `autoexport=1080x1080` makes the app save
-// the exported PNG straight away so the screenshot is the file the app wrote.
-// window.__shotReady is set once the scene has painted.
+// the exported PNG straight away so a screenshot can be the file the app
+// wrote. window.__shotReady is set once the scene has painted.
 
+/** Reads a shot scene out of the page's query string. */
 export function sceneFromQuery(query) {
-  const photos = (query.get('photos') ?? query.get('photo') ?? 'pier')
+  const names = (query.get('photos') ?? query.get('photo') ?? 'pier')
     .split(',')
     .map((name) => name.trim())
     .filter(Boolean);
   return {
     shot: query.get('shot') ?? 'editor',
-    photos,
+    photos: names,
     layout: query.get('layout') ?? 'four',
     grade: query.get('grade') ?? 'vice',
     title: query.get('title') ?? 'SUNSET HEIST',

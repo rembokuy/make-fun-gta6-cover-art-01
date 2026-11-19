@@ -1,10 +1,13 @@
-// Neon Coast layouts: where the photo panels sit on the cover. Every layout is
-// a function of the cover size, so the same arrangement works at 1080 x 1080,
-// 1080 x 1350 and 1920 x 1080. A panel rect is {x, y, w, h} in cover pixels,
-// plus an optional rotation (tilted snapshots) and an optional `frame` flag for
-// the white polaroid border. `titleH` is the height of the lettering band at
-// the foot of the cover; grid layouts keep their panels above it, while the
-// full-bleed layout runs underneath it and the title is scrimmed over the top.
+// Neon Coast layouts: where the photo panels sit on the cover.
+//
+// Every layout is computed from the cover size, so one arrangement works at
+// 1080 x 1080, 1080 x 1350 and 1920 x 1080 alike. A panel is
+// {x, y, w, h} in cover pixels, with two optional extras: `rot` (degrees, for
+// the tilted polaroids) and `frame` (draw a white polaroid border), plus
+// `backdrop` for a slot that is the full-bleed background under the others.
+// `titleH` is the height of the lettering band along the foot; grid layouts
+// keep their panels above it, while full-bleed runs underneath and the title
+// is scrimmed over the top.
 
 export const LAYOUTS = [
   { id: 'four', name: 'Four-Panel Grid', slots: 4 },
@@ -14,65 +17,63 @@ export const LAYOUTS = [
   { id: 'tilted', name: 'Tilted Snapshots', slots: 4 },
 ];
 
-/** Looks a layout up by id, falling back to the first layout. */
+/** Finds a layout by id; unknown ids fall back to the first layout. */
 export function layoutById(id) {
-  return LAYOUTS.find((l) => l.id === id) ?? LAYOUTS[0];
+  for (const layout of LAYOUTS) {
+    if (layout.id === id) return layout;
+  }
+  return LAYOUTS[0];
 }
 
-/** How many photo slots a layout has (its panels, background included). */
+/** How many photo slots a layout has. */
 export function slotCount(layoutId) {
   return layoutById(layoutId).slots;
 }
 
+/** A cols x rows grid of equal rects inside the photo area. */
+function gridRects(cols, rows, W, top, gap) {
+  const w = (W - gap * (cols + 1)) / cols;
+  const h = (top - gap * (rows + 1)) / rows;
+  const rects = [];
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < cols; col += 1) {
+      rects.push({
+        x: gap + col * (w + gap),
+        y: gap + row * (h + gap),
+        w,
+        h,
+      });
+    }
+  }
+  return rects;
+}
+
 /**
- * Returns the panel rects for a layout at cover size W x H, with a lettering
- * band of `titleH` pixels along the foot. Rects are ordered the way the
- * editor's filmstrip fills them: slot 0 first.
+ * The panel rects for a layout at cover size W x H, with a lettering band of
+ * `titleH` along the foot. Rects come back in fill order: slot 0 first.
  */
 export function panelRects(layoutId, W, H, titleH) {
   const gap = Math.max(6, Math.round(Math.min(W, H) * 0.012));
   const top = H - titleH;
-  const x0 = gap;
-  const y0 = gap;
 
-  if (layoutId === 'four') {
-    const w = (W - gap * 3) / 2;
-    const h = (top - gap * 3) / 2;
-    return [
-      { x: x0, y: y0, w, h },
-      { x: x0 + w + gap, y: y0, w, h },
-      { x: x0, y: y0 + h + gap, w, h },
-      { x: x0 + w + gap, y: y0 + h + gap, w, h },
-    ];
-  }
+  if (layoutId === 'four') return gridRects(2, 2, W, top, gap);
+  if (layoutId === 'nine') return gridRects(3, 3, W, top, gap);
 
   if (layoutId === 'hero-three') {
     const heroW = Math.round(W * 0.6);
     const sideX = heroW + gap;
     const sideW = W - heroW - gap * 2;
-    const sh = (top - gap * 4) / 3;
+    const cellH = (top - gap * 4) / 3;
     return [
-      { x: x0, y: y0, w: heroW - gap, h: top - gap * 2 },
-      { x: sideX, y: y0, w: sideW, h: sh },
-      { x: sideX, y: y0 + sh + gap, w: sideW, h: sh },
-      { x: sideX, y: y0 + (sh + gap) * 2, w: sideW, h: sh },
+      { x: gap, y: gap, w: heroW - gap, h: top - gap * 2 },
+      { x: sideX, y: gap, w: sideW, h: cellH },
+      { x: sideX, y: gap + cellH + gap, w: sideW, h: cellH },
+      { x: sideX, y: gap + (cellH + gap) * 2, w: sideW, h: cellH },
     ];
   }
 
   if (layoutId === 'full') {
     return [{ x: 0, y: 0, w: W, h: H }];
-  }
-
-  if (layoutId === 'nine') {
-    const w = (W - gap * 4) / 3;
-    const h = (top - gap * 4) / 3;
-    const rects = [];
-    for (let row = 0; row < 3; row += 1) {
-      for (let col = 0; col < 3; col += 1) {
-        rects.push({ x: x0 + col * (w + gap), y: y0 + row * (h + gap), w, h });
-      }
-    }
-    return rects;
   }
 
   // Tilted Snapshots: slot 0 is the full-bleed backdrop; slots 1..3 are

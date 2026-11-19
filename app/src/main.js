@@ -1,8 +1,9 @@
-// Neon Coast Cover Studio: wires the editor page. A photo list, a design, and
-// a preview canvas; the controls edit the design and every change re-renders
-// the cover. Panels are edited right on the canvas: click one to select it,
-// drag to move its photo, scroll to zoom it. Photos never leave the machine —
-// uploads are read with object URLs and the app makes no network request.
+// Neon Coast Cover Studio: wires the editor page. A photo list, a design,
+// and a preview canvas; the controls edit the design and every change
+// re-paints the cover. Panels are edited right on the canvas: click one to
+// select it, drag to move its photo, scroll to zoom it. Photos never leave
+// the machine — uploads are read with object URLs and the app makes no
+// network request at all.
 
 import { renderCover, titleBandHeight } from './cover.js';
 import { GRADES } from './grades.js';
@@ -11,17 +12,19 @@ import { createHistory, freshDesign, normalisePanels } from './state.js';
 import { EXPORT_SIZES, downloadAllSizes, downloadCover } from './export.js';
 import { markReady, parseExportSize, sceneFromQuery } from './shots.js';
 
-const $ = (id) => document.getElementById(id);
-const canvas = $('stage');
-const ctx = canvas.getContext('2d');
+const el = (id) => document.getElementById(id);
+const stage = el('stage');
+const stageCtx = stage.getContext('2d');
 
-const ASPECTS = {
-  square: { w: 900, h: 900, label: 'Square' },
-  portrait: { w: 720, h: 900, label: 'Portrait' },
-  wide: { w: 960, h: 540, label: 'Wide' },
+// Preview sizes per aspect: the canvas itself stays small and the CSS scales
+// it; exports render the same design at full post size.
+const PREVIEWS = {
+  square: { w: 900, h: 900 },
+  portrait: { w: 720, h: 900 },
+  wide: { w: 960, h: 540 },
 };
 
-const photos = []; // [{ img, name }]
+const photos = []; // [{ img, name, src }]
 let design = freshDesign(0);
 let aspect = 'square';
 let selected = 0;
@@ -42,102 +45,38 @@ function photoImages() {
   return photos.map((p) => p.img);
 }
 
-/** Re-renders the preview canvas at the current aspect. */
-function render() {
-  const size = ASPECTS[aspect];
-  canvas.width = size.w;
-  canvas.height = size.h;
-  renderCover(ctx, size.w, size.h, design, photoImages(), selected);
-  $('undo').disabled = !history.canUndo;
-  $('redo').disabled = !history.canRedo;
+/** Re-paints the preview canvas at the current aspect. */
+function paint() {
+  const size = PREVIEWS[aspect];
+  stage.width = size.w;
+  stage.height = size.h;
+  renderCover(stageCtx, size.w, size.h, design, photoImages(), selected);
+  el('undo').disabled = !history.canUndo;
+  el('redo').disabled = !history.canRedo;
 }
 
 /** Records the design before a change, for undo. */
-function checkpoint() {
+function remember() {
   history.push(design);
 }
 
 /** The rects of the current layout at preview size, for hit-testing. */
-function currentRects() {
-  return panelRects(design.layout, canvas.width, canvas.height, titleBandHeight(canvas.height));
+function previewRects() {
+  return panelRects(design.layout, stage.width, stage.height, titleBandHeight(stage.height));
 }
 
-/** Builds the filmstrip thumbnails from the photo list. */
-function buildFilmstrip() {
-  const strip = $('filmstrip');
-  strip.innerHTML = '';
-  photos.forEach((photo, i) => {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'thumb';
-    button.title = `${photo.name} — click to put it in the selected panel`;
-    const img = document.createElement('img');
-    img.src = photo.src;
-    img.alt = photo.name;
-    button.appendChild(img);
-    button.addEventListener('click', () => {
-      checkpoint();
-      design.panels[selected].photo = i;
-      design.panels[selected].zoom = 1;
-      design.panels[selected].ox = 0;
-      design.panels[selected].oy = 0;
-      render();
-    });
-    strip.appendChild(button);
-  });
+/** Copies the design's texts and toggles back into the inputs. */
+function syncInputs() {
+  el('title').value = design.title;
+  el('subtitle').value = design.subtitle;
+  el('badge').value = design.badge;
+  el('grain').checked = design.grain;
+  el('vignette').checked = design.vignette;
+  el('halftone').checked = design.halftone;
+  syncPickerStates();
 }
 
-/** Builds the layout picker buttons from the layout list. */
-function buildLayoutPicker() {
-  const wrap = $('layouts');
-  LAYOUTS.forEach((layout) => {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'pick';
-    button.dataset.layout = layout.id;
-    button.textContent = layout.name;
-    button.addEventListener('click', () => {
-      if (design.layout === layout.id) return;
-      checkpoint();
-      design.layout = layout.id;
-      normalisePanels(design);
-      selected = Math.min(selected, slotCount(layout.id) - 1);
-      syncPickerStates();
-      render();
-    });
-    wrap.appendChild(button);
-  });
-}
-
-/** Builds the grade swatch buttons from the grade list. */
-function buildGradePicker() {
-  const wrap = $('grades');
-  GRADES.forEach((grade) => {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'swatch';
-    button.dataset.grade = grade.id;
-    const stops = grade.stops;
-    const first = stops[0][1];
-    const mid = stops[Math.floor(stops.length / 2)][1];
-    const last = stops[stops.length - 1][1];
-    button.style.background = `linear-gradient(135deg, rgb(${first.join(',')}), rgb(${mid.join(',')}) 55%, rgb(${last.join(',')}))`;
-    button.title = grade.name;
-    const label = document.createElement('span');
-    label.textContent = grade.name;
-    button.appendChild(label);
-    button.addEventListener('click', () => {
-      if (design.grade === grade.id) return;
-      checkpoint();
-      design.grade = grade.id;
-      syncPickerStates();
-      render();
-    });
-    wrap.appendChild(button);
-  });
-}
-
-/** Marks the active layout and grade buttons. */
+/** Marks the active layout, grade and aspect buttons. */
 function syncPickerStates() {
   document.querySelectorAll('#layouts .pick').forEach((b) => {
     b.classList.toggle('active', b.dataset.layout === design.layout);
@@ -150,7 +89,87 @@ function syncPickerStates() {
   });
 }
 
-/** Adds a loaded photo to the list and puts it in the selected panel. */
+function setStatus(text) {
+  el('status').textContent = text;
+}
+
+/** Rebuilds the filmstrip thumbnails from the photo list. */
+function buildFilmstrip() {
+  const strip = el('filmstrip');
+  strip.innerHTML = '';
+  photos.forEach((photo, i) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'thumb';
+    button.title = `${photo.name} — click to put it in the selected panel`;
+    const img = document.createElement('img');
+    img.src = photo.src;
+    img.alt = photo.name;
+    button.appendChild(img);
+    button.addEventListener('click', () => {
+      remember();
+      const slot = design.panels[selected];
+      slot.photo = i;
+      slot.zoom = 1;
+      slot.ox = 0;
+      slot.oy = 0;
+      paint();
+    });
+    strip.appendChild(button);
+  });
+}
+
+/** Builds the layout picker buttons from the layout list. */
+function buildLayoutPicker() {
+  const wrap = el('layouts');
+  for (const layout of LAYOUTS) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'pick';
+    button.dataset.layout = layout.id;
+    button.textContent = layout.name;
+    button.addEventListener('click', () => {
+      if (design.layout === layout.id) return;
+      remember();
+      design.layout = layout.id;
+      normalisePanels(design);
+      selected = Math.min(selected, slotCount(layout.id) - 1);
+      syncPickerStates();
+      paint();
+    });
+    wrap.appendChild(button);
+  }
+}
+
+/** Builds the grade swatch buttons from the grade list. */
+function buildGradePicker() {
+  const wrap = el('grades');
+  for (const grade of GRADES) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'swatch';
+    button.dataset.grade = grade.id;
+    const stops = grade.stops;
+    const first = stops[0].slice(1);
+    const mid = stops[Math.floor(stops.length / 2)].slice(1);
+    const last = stops[stops.length - 1].slice(1);
+    button.style.background = `linear-gradient(135deg, rgb(${first.join(',')}), rgb(${mid.join(',')}) 55%, rgb(${last.join(',')}))`;
+    button.title = grade.name;
+    const label = document.createElement('span');
+    label.textContent = grade.name;
+    button.appendChild(label);
+    button.addEventListener('click', () => {
+      if (design.grade === grade.id) return;
+      remember();
+      design.grade = grade.id;
+      syncPickerStates();
+      paint();
+    });
+    wrap.appendChild(button);
+  }
+}
+
+/** Adds a loaded photo to the list and drops it into an empty selected panel. */
 function addPhoto(img, name, src) {
   photos.push({ img, name, src });
   const slot = design.panels[selected];
@@ -163,11 +182,11 @@ function addPhoto(img, name, src) {
   buildFilmstrip();
 }
 
-/** Uploads: reads each chosen file and adds it as a photo. */
-$('upload').addEventListener('change', async (event) => {
+// Uploads: reads each chosen file and adds it as a photo.
+el('upload').addEventListener('change', async (event) => {
   const files = [...event.target.files];
   if (files.length === 0) return;
-  checkpoint();
+  remember();
   for (const file of files) {
     try {
       const url = URL.createObjectURL(file);
@@ -177,50 +196,50 @@ $('upload').addEventListener('change', async (event) => {
       setStatus(`Could not read ${file.name}.`);
     }
   }
-  render();
+  paint();
   event.target.value = '';
 });
 
-/** Fill every panel with the selected panel's photo. */
-$('fill-all').addEventListener('click', () => {
+// Fill every panel with the selected panel's photo.
+el('fill-all').addEventListener('click', () => {
   const photo = design.panels[selected].photo;
   if (photo === -1) return;
-  checkpoint();
-  design.panels.forEach((slot) => {
+  remember();
+  for (const slot of design.panels) {
     slot.photo = photo;
     slot.zoom = 1;
     slot.ox = 0;
     slot.oy = 0;
-  });
-  render();
+  }
+  paint();
 });
 
-/** Clear the selected panel back to an empty slot. */
-$('clear-panel').addEventListener('click', () => {
-  checkpoint();
+// Clear the selected panel back to an empty slot.
+el('clear-panel').addEventListener('click', () => {
+  remember();
   design.panels[selected] = { photo: -1, zoom: 1, ox: 0, oy: 0 };
-  render();
+  paint();
 });
 
-// Caption inputs: live-render while typing, checkpoint once on change.
+// Caption inputs: live-paint while typing, checkpoint once on change.
 for (const [id, key] of [['title', 'title'], ['subtitle', 'subtitle'], ['badge', 'badge']]) {
-  const input = $(id);
+  const input = el(id);
   input.addEventListener('input', () => {
     design[key] = input.value;
-    render();
+    paint();
   });
   input.addEventListener('change', () => {
     history.push(design);
-    render();
+    paint();
   });
 }
 
 // Finish toggles.
 for (const key of ['grain', 'vignette', 'halftone']) {
-  $(key).addEventListener('change', (event) => {
-    checkpoint();
+  el(key).addEventListener('change', (event) => {
+    remember();
     design[key] = event.target.checked;
-    render();
+    paint();
   });
 }
 
@@ -229,62 +248,47 @@ document.querySelectorAll('#aspects .pick').forEach((button) => {
   button.addEventListener('click', () => {
     aspect = button.dataset.aspect;
     syncPickerStates();
-    render();
+    paint();
   });
 });
 
 // Undo / redo, buttons and keyboard.
-$('undo').addEventListener('click', () => {
+function stepBack() {
   const prev = history.undo(design);
-  if (prev) {
-    design = prev;
-    selected = Math.min(selected, slotCount(design.layout) - 1);
-    syncInputs();
-    render();
-  }
-});
-$('redo').addEventListener('click', () => {
+  if (!prev) return;
+  design = prev;
+  selected = Math.min(selected, slotCount(design.layout) - 1);
+  syncInputs();
+  paint();
+}
+function stepForward() {
   const next = history.redo(design);
-  if (next) {
-    design = next;
-    selected = Math.min(selected, slotCount(design.layout) - 1);
-    syncInputs();
-    render();
-  }
-});
+  if (!next) return;
+  design = next;
+  selected = Math.min(selected, slotCount(design.layout) - 1);
+  syncInputs();
+  paint();
+}
+el('undo').addEventListener('click', stepBack);
+el('redo').addEventListener('click', stepForward);
 document.addEventListener('keydown', (event) => {
   const mod = event.ctrlKey || event.metaKey;
   if (!mod || event.key.toLowerCase() !== 'z') return;
   if (event.target.matches('input, textarea')) return;
   event.preventDefault();
-  if (event.shiftKey) $('redo').click();
-  else $('undo').click();
+  if (event.shiftKey) stepForward();
+  else stepBack();
 });
 
-/** Copies the design's texts and toggles back into the inputs. */
-function syncInputs() {
-  $('title').value = design.title;
-  $('subtitle').value = design.subtitle;
-  $('badge').value = design.badge;
-  $('grain').checked = design.grain;
-  $('vignette').checked = design.vignette;
-  $('halftone').checked = design.halftone;
-  syncPickerStates();
-}
-
-function setStatus(text) {
-  $('status').textContent = text;
-}
-
 // Export actions.
-$('export-all').addEventListener('click', async () => {
+el('export-all').addEventListener('click', async () => {
   setStatus('Exporting three sizes…');
   const saved = await downloadAllSizes(design, photoImages(), (name) => {
     setStatus(`Saved ${name}…`);
   });
   setStatus(saved.length === 3 ? `Saved ${saved.join(', ')}.` : 'Export finished.');
 });
-EXPORT_SIZES.forEach((size) => {
+for (const size of EXPORT_SIZES) {
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'pick';
@@ -293,23 +297,23 @@ EXPORT_SIZES.forEach((size) => {
     await downloadCover(design, photoImages(), size.w, size.h);
     setStatus(`Saved neon-coast-${size.w}x${size.h}.png.`);
   });
-  $('export-one').appendChild(button);
-});
+  el('export-one').appendChild(button);
+}
 
 // Canvas editing: click to select a panel, drag to pan its photo, scroll to zoom.
 let drag = null;
 let wheelBurst = null;
 
 function canvasPoint(event) {
-  const rect = canvas.getBoundingClientRect();
+  const rect = stage.getBoundingClientRect();
   return {
-    x: ((event.clientX - rect.left) / rect.width) * canvas.width,
-    y: ((event.clientY - rect.top) / rect.height) * canvas.height,
+    x: ((event.clientX - rect.left) / rect.width) * stage.width,
+    y: ((event.clientY - rect.top) / rect.height) * stage.height,
   };
 }
 
 function hitPanel(point) {
-  const rects = currentRects();
+  const rects = previewRects();
   for (let i = rects.length - 1; i >= 0; i -= 1) {
     const r = rects[i];
     if (point.x >= r.x && point.x <= r.x + r.w && point.y >= r.y && point.y <= r.y + r.h) return i;
@@ -317,22 +321,21 @@ function hitPanel(point) {
   return -1;
 }
 
-canvas.addEventListener('pointerdown', (event) => {
+stage.addEventListener('pointerdown', (event) => {
   const point = canvasPoint(event);
   const hit = hitPanel(point);
   if (hit === -1) return;
   if (hit !== selected) selected = hit;
-  checkpoint();
+  remember();
   drag = { panel: hit, last: point };
-  canvas.setPointerCapture(event.pointerId);
-  render();
+  stage.setPointerCapture(event.pointerId);
+  paint();
 });
 
-canvas.addEventListener('pointermove', (event) => {
+stage.addEventListener('pointermove', (event) => {
   if (!drag) return;
   const point = canvasPoint(event);
-  const rects = currentRects();
-  const rect = rects[drag.panel];
+  const rect = previewRects()[drag.panel];
   const slot = design.panels[drag.panel];
   if (!rect || !slot || slot.photo === -1) return;
   slot.ox += (point.x - drag.last.x) / rect.w;
@@ -340,28 +343,28 @@ canvas.addEventListener('pointermove', (event) => {
   slot.ox = Math.max(-0.6, Math.min(0.6, slot.ox));
   slot.oy = Math.max(-0.6, Math.min(0.6, slot.oy));
   drag.last = point;
-  render();
+  paint();
 });
 
-canvas.addEventListener('pointerup', () => {
+stage.addEventListener('pointerup', () => {
   drag = null;
 });
 
-canvas.addEventListener('wheel', (event) => {
+stage.addEventListener('wheel', (event) => {
   event.preventDefault();
   const slot = design.panels[selected];
   if (!slot || slot.photo === -1) return;
   if (!wheelBurst) {
-    checkpoint();
+    remember();
     wheelBurst = setTimeout(() => {
       wheelBurst = null;
     }, 450);
   }
   slot.zoom = Math.max(1, Math.min(3.5, slot.zoom * Math.exp(-event.deltaY * 0.0012)));
-  render();
+  paint();
 }, { passive: false });
 
-/** Starts the studio: fonts, samples, then the first render or a shot scene. */
+/** Starts the studio: fonts, samples, then the first paint or a shot scene. */
 async function start() {
   buildLayoutPicker();
   buildGradePicker();
@@ -377,10 +380,10 @@ async function start() {
 
   const query = new URLSearchParams(location.search);
   const scene = sceneFromQuery(query);
-  const hasShot = query.has('shot');
+  const isShot = query.has('shot');
 
   // The default samples load first so the cover is never empty.
-  const sampleNames = hasShot ? scene.photos : ['boulevard', 'pier'];
+  const sampleNames = isShot ? scene.photos : ['boulevard', 'pier'];
   for (const name of sampleNames) {
     try {
       const img = await loadImage(`samples/${name}.jpg`);
@@ -390,7 +393,7 @@ async function start() {
     }
   }
   design = freshDesign(photos.length);
-  if (hasShot) {
+  if (isShot) {
     design.layout = scene.layout;
     design.grade = scene.grade;
     design.title = scene.title;
@@ -400,14 +403,14 @@ async function start() {
     design.panels.forEach((slot, i) => {
       slot.photo = photos.length > 0 ? i % photos.length : -1;
     });
-    aspect = ASPECTS[scene.aspect] ? scene.aspect : 'square';
+    aspect = PREVIEWS[scene.aspect] ? scene.aspect : 'square';
     if (scene.shot === 'cover') document.body.classList.add('shot-cover');
   }
   syncInputs();
   buildFilmstrip();
-  render();
+  paint();
 
-  if (hasShot) {
+  if (isShot) {
     const size = parseExportSize(scene.autoexport);
     if (size) {
       await downloadCover(design, photoImages(), size.w, size.h);

@@ -1,11 +1,10 @@
 // Neon Coast Cover Studio — the hand-in program for gta6-cover-art-01.
 //
 // The app is plain static files under app/ (index.html, its ES modules,
-// vendored fonts and the two sample photos) that any static server can
-// serve offline. This program copies app/ and screenshots/ from beside
-// this file into the output directory and writes dossier.json there, the
-// summary the judge reads, using the vendored make.fun library in
-// vendor/makefun-app.ts.
+// vendored fonts and the two sample photos) that any static server can serve
+// offline. This program copies app/ and screenshots/ from beside this file
+// into the output directory and writes dossier.json there — the summary the
+// judge reads — using the vendored make.fun library in vendor/makefun-app.ts.
 //
 // Run it locally with:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
@@ -13,8 +12,8 @@
 //
 // The output directory is only ever created, never deleted: in the grader
 // /output is a mount point owned by root while this program runs as user
-// 65534, so removing it would fail with EACCES. The grader hands us a
-// fresh directory, so there is nothing stale to clean up.
+// 65534, so removing it would fail with EACCES. The grader hands us a fresh
+// directory, so there is nothing stale to clean up.
 
 import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -31,8 +30,8 @@ if (existsSync(join(here, 'screenshots'))) {
   cpSync(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
 }
 
-// The scorer's own caps: dossier text at most 160 KiB, screenshots at
-// most 4 files of 256 KiB each, app/ at most 993 files and 48 MiB in all.
+// The scorer's own caps: dossier text at most 160 KiB, screenshots at most
+// 4 files of 256 KiB each, app/ at most 993 files and 48 MiB in all.
 writeFileSync(
   join(out, 'dossier.json'),
   buildDossier(out, {
