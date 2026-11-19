@@ -1,16 +1,22 @@
 // Neon Coast Cover Studio — the hand-in program for gta6-cover-art-01.
 //
-// The app itself is plain static files under app/ (index.html plus its ES
-// modules, vendored fonts and the two sample photos) that any static server
-// can serve offline. This program copies app/ and screenshots/ from beside
-// this file into /output and writes /output/dossier.json, the summary the
-// judge reads, using the vendored make.fun library in vendor/makefun-app.ts.
+// The app is plain static files under app/ (index.html, its ES modules,
+// vendored fonts and the two sample photos) that any static server can
+// serve offline. This program copies app/ and screenshots/ from beside
+// this file into the output directory and writes dossier.json there, the
+// summary the judge reads, using the vendored make.fun library in
+// vendor/makefun-app.ts.
 //
 // Run it locally with:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 // Outside the grader, MAKEFUN_OUTPUT_DIR stands in for /output.
+//
+// The output directory is only ever created, never deleted: in the grader
+// /output is a mount point owned by root while this program runs as user
+// 65534, so removing it would fail with EACCES. The grader hands us a
+// fresh directory, so there is nothing stale to clean up.
 
-import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-app.ts';
@@ -18,8 +24,6 @@ import { buildDossier } from './vendor/makefun-app.ts';
 const here = fileURLToPath(new URL('.', import.meta.url));
 const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
-// Start from a clean output directory so a stale file can never be handed in.
-rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
 cpSync(join(here, 'app'), join(out, 'app'), { recursive: true });
 mkdirSync(join(out, 'screenshots'), { recursive: true });
@@ -27,8 +31,8 @@ if (existsSync(join(here, 'screenshots'))) {
   cpSync(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
 }
 
-// The scorer's own caps: screenshots at most 4 files of 256 KiB each, app/ at
-// most 993 files and 48 MiB in all, and the dossier text at most 160 KiB.
+// The scorer's own caps: dossier text at most 160 KiB, screenshots at
+// most 4 files of 256 KiB each, app/ at most 993 files and 48 MiB in all.
 writeFileSync(
   join(out, 'dossier.json'),
   buildDossier(out, {
