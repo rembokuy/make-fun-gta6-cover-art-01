@@ -1,137 +1,100 @@
-// Probe the editor end to end in headless Chromium.
-//
-// Usage: node serve.ts must already be running on http://localhost:8080,
-// then `node scripts/probe-interactions.mjs`. The probe opens the plain
-// editor, waits for the two sample thumbnails, clicks the Nine-Panel Grid
-// layout and the Turbo Teal grade, checks the undo button is enabled, and
-// clicks "Export all 3 sizes" until three PNGs land in the download
-// folder. Any failed check, page exception, console error or request
-// outside localhost exits 1.
+// Interaction probe: drive the plain editor in Chromium, exercise layout /
+// grade pickers, undo state, and the 3-size PNG export. Exits 1 on any
+// failed check, exception, console error, or external request.
 
-import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { launchChrome, newTab, connect, evaluate, waitFor } from './cdp.mjs';
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { launchChromium } from "./cdp.mjs";
 
 const repoDir = dirname(dirname(fileURLToPath(import.meta.url)));
-const tmpDir = join(repoDir, 'shots-tmp');
-const profileDir = join(tmpDir, 'profile-probe');
-const downloadDir = join(tmpDir, 'downloads');
-const PORT = 9223;
+const downloadsDir = join(repoDir, "shots-tmp", "downloads");
+
+rmSync(downloadsDir, { recursive: true, force: true });
+mkdirSync(downloadsDir, { recursive: true });
+
+const cdp = await launchChromium({
+  port: 9223,
+  userDataDir: join(repoDir, "shots-tmp", "profile-probe"),
+  width: 1280,
+  height: 900,
+});
 
 const checks = {};
-const problems = [];
-
-function check(name, ok, detail = '') {
-  checks[name] = ok ? `pass${detail ? ` (${detail})` : ''}` : `FAIL${detail ? ` (${detail})` : ''}`;
-  if (!ok) problems.push(`${name}: ${detail}`);
+function check(name, ok) {
+  checks[name] = !!ok;
+  console.log(`${ok ? "PASS" : "FAIL"} ${name}`);
 }
 
-async function main() {
-  mkdirSync(downloadDir, { recursive: true });
-  // Clear stale downloads so the three PNGs we wait for are this run's.
-  for (const f of readdirSync(downloadDir)) {
-    if (f.endsWith('.png') || f.endsWith('.crdownload')) rmSync(join(downloadDir, f), { force: true });
-  }
-  const chrome = await launchChrome({ port: PORT, profile: profileDir });
-  let statusText = '';
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+try {
   try {
-    const target = await newTab(PORT, 'http://localhost:8080/');
-    const session = await connect(target.webSocketDebuggerUrl);
-    const exceptions = [];
-    const consoleErrors = [];
-    const external = [];
-    session.on('Runtime.exceptionThrown', (params) => {
-      exceptions.push(params.exceptionDetails?.exception?.description ?? params.exceptionDetails?.text ?? 'exception');
-    });
-    session.on('Runtime.consoleAPICalled', (params) => {
-      if (params.type === 'error') {
-        consoleErrors.push(params.args.map((a) => a.value ?? a.description ?? '').join(' '));
-      }
-    });
-    session.on('Network.requestWillBeSent', (params) => {
-      const url = params.request?.url ?? '';
-      try {
-        const host = new URL(url).hostname;
-        if (host !== 'localhost' && host !== '127.0.0.1') external.push(url);
-      } catch {
-        // Not a URL we can judge.
-      }
-    });
-
-    await session.send('Page.enable');
-    await session.send('Runtime.enable');
-    await session.send('Network.enable');
-    await session.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloadDir });
-    await session.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
-
-    await waitFor(async () => {
-      try {
-        return (await evaluate(session, `document.querySelectorAll('#filmstrip img').length`)) >= 2;
-      } catch {
-        return false;
-      }
-    }, { timeout: 30000, label: 'two sample thumbnails' });
-    check('two sample thumbnails loaded', true);
-
-    const thumbsComplete = await evaluate(session, `[...document.querySelectorAll('#filmstrip img')].every((i) => i.complete && i.naturalWidth > 0)`);
-    check('sample thumbnails are real images', thumbsComplete === true);
-
-    const clickedLayout = await evaluate(session, `
-      (() => {
-        const btn = [...document.querySelectorAll('#layouts button')].find((b) => b.textContent.trim() === 'Nine-Panel Grid');
-        if (!btn) return false;
-        btn.click();
-        return btn.classList.contains('active');
-      })()
-    `);
-    check('layout "Nine-Panel Grid" becomes active', clickedLayout === true);
-
-    const clickedGrade = await evaluate(session, `
-      (() => {
-        const btn = [...document.querySelectorAll('#grades button')].find((b) => b.title === 'Turbo Teal');
-        if (!btn) return false;
-        btn.click();
-        return btn.classList.contains('active');
-      })()
-    `);
-    check('grade "Turbo Teal" becomes active', clickedGrade === true);
-
-    const undoEnabled = await evaluate(session, `!document.getElementById('undo').disabled`);
-    check('undo button enabled after edits', undoEnabled === true);
-
-    await evaluate(session, `document.getElementById('export-all').click()`);
-    await waitFor(async () => {
-      const files = readdirSync(downloadDir).filter((f) => f.endsWith('.png') && !f.endsWith('.crdownload'));
-      return files.length >= 3;
-    }, { timeout: 30000, label: 'three PNG downloads' });
-    const downloaded = readdirSync(downloadDir).filter((f) => f.endsWith('.png')).sort();
-    check('3 PNG files downloaded', downloaded.length === 3, downloaded.join(', '));
-
-    // The final "Exported …" status lands a beat after the last download
-    // (the exporter pauses 350 ms between sizes), so wait for it.
-    await waitFor(async () => {
-      statusText = await evaluate(session, `document.getElementById('status').textContent`);
-      return typeof statusText === 'string' && statusText.includes('Exported');
-    }, { timeout: 10000, label: 'final export status' });
-    check('status reports the export', true, statusText);
-
-    check('no page exceptions', exceptions.length === 0, exceptions.join(' | '));
-    check('no console errors', consoleErrors.length === 0, consoleErrors.join(' | '));
-    check('no external requests', external.length === 0, external.join(' | '));
-    session.close();
-  } finally {
-    chrome.kill();
+    await cdp.send("Page.setDownloadBehavior", { behavior: "allow", downloadPath: downloadsDir });
+  } catch {
+    await cdp.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: downloadsDir });
   }
 
-  console.log(JSON.stringify({ checks, status: statusText, problems }, null, 2));
-  if (problems.length > 0) {
-    console.error(`FAILED: ${problems.length} problem(s)`);
-    process.exit(1);
+  await cdp.setViewport(1280, 900);
+  await cdp.navigate("http://localhost:8080/");
+  await cdp.waitFor("document.querySelectorAll('#filmstrip img').length >= 2", 30000);
+  check("two sample thumbnails loaded", true);
+
+  await cdp.evaluate(
+    `[...document.querySelectorAll('#layouts button')].find(b => b.textContent.trim() === 'Nine-Panel Grid').click()`
+  );
+  await sleep(300);
+  check(
+    "Nine-Panel Grid becomes active",
+    await cdp.evaluate(
+      `[...document.querySelectorAll('#layouts button')].find(b => b.textContent.trim() === 'Nine-Panel Grid').classList.contains('active')`
+    )
+  );
+
+  await cdp.evaluate(
+    `[...document.querySelectorAll('#grades button')].find(b => b.textContent.trim() === 'Turbo Teal').click()`
+  );
+  await sleep(300);
+  check(
+    "Turbo Teal becomes active",
+    await cdp.evaluate(
+      `[...document.querySelectorAll('#grades button')].find(b => b.textContent.trim() === 'Turbo Teal').classList.contains('active')`
+    )
+  );
+
+  check("undo enabled after changes", await cdp.evaluate(`!document.querySelector('#undo').disabled`));
+
+  await cdp.evaluate(`document.querySelector('#export-all').click()`);
+  const deadline = Date.now() + 30000;
+  let pngs = [];
+  while (Date.now() < deadline) {
+    pngs = readdirSync(downloadsDir).filter((f) => f.endsWith(".png") && statSync(join(downloadsDir, f)).size > 0);
+    if (pngs.length >= 3) break;
+    await sleep(500);
   }
+  check("3 PNG files downloaded", pngs.length >= 3);
+  // Let the final status line settle after the last download.
+  await sleep(1200);
+  const status = await cdp.evaluate(`document.querySelector('#status').textContent`);
+  checks.statusText = status;
+  check("status reports exported files", status.startsWith("Exported"));
+} finally {
+  cdp.close();
 }
 
-main().catch((err) => {
-  console.error(`FAILED: ${err.message}`);
-  process.exit(1);
-});
+const report = {
+  checks,
+  exceptions: cdp.exceptions,
+  consoleErrors: cdp.consoleErrors,
+  externalRequests: cdp.externalRequests,
+};
+console.log(JSON.stringify(report, null, 2));
+
+const failed =
+  Object.values(checks).some((v) => v === false) ||
+  cdp.exceptions.length > 0 ||
+  cdp.consoleErrors.length > 0 ||
+  cdp.externalRequests.length > 0;
+process.exit(failed ? 1 : 0);

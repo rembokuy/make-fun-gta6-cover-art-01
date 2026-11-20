@@ -8,35 +8,30 @@
 </head>
 <body>
 <header class="topbar">
-  <div class="brand">NC <span class="brand-name">NEON COAST</span> <em>Cover Studio</em></div>
-  <p class="tagline">GTA 6-style covers · offline in your browser · your photos never leave this machine</p>
+  <div class="brand"><span class="brand-mark">NC</span> NEON COAST <em>Cover Studio</em></div>
+  <p class="topbar-note">GTA 6-style covers · offline in your browser · your photos never leave this machine</p>
 </header>
-
 <main class="workspace">
   <aside class="controls">
     <section class="panel">
       <h2>Photos</h2>
-      <label class="upload" for="upload">Upload photos
-        <input id="upload" type="file" accept="image/*" multiple hidden>
-      </label>
-      <div id="filmstrip" class="filmstrip" aria-label="Photo filmstrip"></div>
+      <label class="upload-btn" for="upload">Add photos…</label>
+      <input id="upload" type="file" accept="image/*" multiple hidden>
+      <div id="filmstrip" class="filmstrip"></div>
       <p class="hint">Click a photo to put it in the selected panel. Two sample photos are loaded already.</p>
       <div class="row">
         <button id="fill-all" type="button">Fill all panels</button>
         <button id="clear-panel" type="button">Clear panel</button>
       </div>
     </section>
-
     <section class="panel">
       <h2>Layout</h2>
-      <div id="layouts" class="picker" role="group" aria-label="Layout"></div>
+      <div id="layouts" class="picker"></div>
     </section>
-
     <section class="panel">
       <h2>Grade</h2>
-      <div id="grades" class="swatches" role="group" aria-label="Grade"></div>
+      <div id="grades" class="swatches"></div>
     </section>
-
     <section class="panel">
       <h2>Lettering</h2>
       <label class="field">Title
@@ -49,10 +44,9 @@
         <input id="badge" type="text" maxlength="18" value="NEON COAST">
       </label>
     </section>
-
     <section class="panel">
       <h2>Finish</h2>
-      <label class="check"><input id="grain" type="checkbox" checked> Grain</label>
+      <label class="check"><input id="grain" type="checkbox" checked> Film grain</label>
       <label class="check"><input id="vignette" type="checkbox" checked> Vignette</label>
       <label class="check"><input id="halftone" type="checkbox" checked> Halftone dots</label>
       <div class="row">
@@ -60,22 +54,23 @@
         <button id="redo" type="button">Redo</button>
       </div>
     </section>
-
     <section class="panel">
       <h2>Export</h2>
-      <div id="aspects" class="picker" role="group" aria-label="Aspect ratio"></div>
+      <div id="aspects" class="picker">
+        <button type="button" data-aspect="square" class="active">Square</button>
+        <button type="button" data-aspect="portrait">Portrait</button>
+        <button type="button" data-aspect="wide">Wide</button>
+      </div>
       <button id="export-all" type="button" class="primary">Export all 3 sizes — PNG</button>
-      <div id="export-one" class="picker" aria-label="Export one size"></div>
-      <p id="status" class="status" role="status">Ready.</p>
+      <div id="export-one" class="row"></div>
+      <p id="status" class="status" aria-live="polite"></p>
     </section>
   </aside>
-
   <section class="stage-wrap">
     <canvas id="stage" width="900" height="900"></canvas>
-    <p class="hint">Click a panel to select it · drag to move its photo · scroll to zoom · Ctrl+Z to undo</p>
+    <p class="hint stage-hint">Click a panel to select it · drag to move its photo · scroll to zoom · Ctrl+Z to undo</p>
   </section>
 </main>
-
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>

@@ -1,84 +1,69 @@
-// Minimal Chrome DevTools Protocol helpers over Node's built-in WebSocket.
-// No dependencies: the scripts in this folder talk straight to the vendored
-// Chromium's remote debugging port.
+// Minimal Chrome DevTools Protocol client over a plain Node WebSocket.
+// No dependencies: launches the vendored Chromium, talks CDP, and records
+// console errors, exceptions, and network requests for the caller.
 
-import { spawn } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { spawn } from "node:child_process";
+import { mkdirSync } from "node:fs";
 
-export const CHROME = `${process.env.HOME}/.cache/ms-playwright/chromium-1255/chrome-linux64/chrome`;
+const CHROME =
+  process.env.CHROME_PATH ||
+  `${process.env.HOME}/.cache/ms-playwright/chromium-1255/chrome-linux64/chrome`;
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
-/** Start headless Chromium with a debugging port; resolve once it answers. */
-export async function launchChrome({ port, profile, extraArgs = [] }) {
-  mkdirSync(profile, { recursive: true });
-  const args = [
-    '--headless=new',
-    '--no-sandbox',
-    '--disable-gpu',
-    '--hide-scrollbars',
-    '--no-first-run',
-    '--disable-extensions',
-    `--remote-debugging-port=${port}`,
-    `--user-data-dir=${profile}`,
-    ...extraArgs,
-  ];
-  const child = spawn(CHROME, args, { stdio: 'ignore' });
-  const deadline = Date.now() + 30000;
-  for (;;) {
+async function fetchJson(url, tries = 40) {
+  for (let i = 0; i < tries; i++) {
     try {
-      const res = await fetch(`http://127.0.0.1:${port}/json/version`);
-      if (res.ok) return child;
+      const res = await fetch(url);
+      if (res.ok) return await res.json();
     } catch {
       // Not up yet.
     }
-    if (Date.now() > deadline) {
-      child.kill();
-      throw new Error(`Chromium did not start a debugging port on ${port}`);
-    }
     await sleep(250);
   }
+  throw new Error(`DevTools endpoint never came up: ${url}`);
 }
 
-/** Open a new tab at `url` and return its target (with webSocketDebuggerUrl). */
-export async function newTab(port, url) {
-  const res = await fetch(`http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`, { method: 'PUT' });
-  if (!res.ok) throw new Error(`cannot open tab: HTTP ${res.status}`);
-  return res.json();
-}
-
-/** A CDP session: send() awaits a method's reply; on() subscribes to events. */
-export class Session {
-  constructor(wsUrl) {
-    this.ws = new WebSocket(wsUrl);
+export class Cdp {
+  constructor(ws, proc) {
+    this.ws = ws;
+    this.proc = proc;
     this.nextId = 1;
     this.pending = new Map();
-    this.listeners = new Map();
-    this.ws.addEventListener('message', (event) => {
-      let msg;
-      try {
-        msg = JSON.parse(event.data);
-      } catch {
-        return;
-      }
-      if (msg.id !== undefined && this.pending.has(msg.id)) {
+    this.exceptions = [];
+    this.consoleErrors = [];
+    this.externalRequests = [];
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      if (msg.id && this.pending.has(msg.id)) {
         const { resolve, reject } = this.pending.get(msg.id);
         this.pending.delete(msg.id);
-        if (msg.error) reject(new Error(`${msg.error.message} (code ${msg.error.code})`));
-        else resolve(msg.result ?? {});
-      } else if (msg.method) {
-        const handlers = this.listeners.get(msg.method) ?? [];
-        for (const fn of handlers) fn(msg.params ?? {});
+        if (msg.error) reject(new Error(msg.error.message));
+        else resolve(msg.result);
       }
-    });
-  }
-
-  get ready() {
-    return new Promise((resolve, reject) => {
-      this.ws.addEventListener('open', resolve, { once: true });
-      this.ws.addEventListener('error', reject, { once: true });
-    });
+      if (msg.method === "Runtime.exceptionThrown") {
+        const d = msg.params.exceptionDetails;
+        this.exceptions.push(d?.exception?.description || d?.text || "exception");
+      }
+      if (msg.method === "Runtime.consoleAPICalled" && msg.params.type === "error") {
+        this.consoleErrors.push(
+          msg.params.args.map((a) => a.value ?? a.description ?? "").join(" ")
+        );
+      }
+      if (msg.method === "Network.requestWillBeSent") {
+        const url = msg.params.request.url;
+        try {
+          const host = new URL(url).hostname;
+          if (host !== "localhost" && host !== "127.0.0.1") {
+            this.externalRequests.push(url);
+          }
+        } catch {
+          this.externalRequests.push(url);
+        }
+      }
+    };
   }
 
   send(method, params = {}) {
@@ -89,43 +74,87 @@ export class Session {
     });
   }
 
-  on(method, fn) {
-    if (!this.listeners.has(method)) this.listeners.set(method, []);
-    this.listeners.get(method).push(fn);
+  // Evaluate JS in the page and return the value (returnByValue).
+  // NOTE: the CDP reply nests it as result.result.value — one level deeper
+  // than the method result itself. Destructure carefully.
+  async evaluate(expression) {
+    const result = await this.send("Runtime.evaluate", {
+      expression,
+      returnByValue: true,
+      awaitPromise: true,
+    });
+    return result?.result?.value;
+  }
+
+  async waitFor(expression, timeoutMs = 30000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (await this.evaluate(expression)) return true;
+      await sleep(200);
+    }
+    throw new Error(`Timed out waiting for: ${expression}`);
+  }
+
+  async navigate(url) {
+    await this.send("Page.navigate", { url });
+  }
+
+  async setViewport(w, h) {
+    await this.send("Emulation.setDeviceMetricsOverride", {
+      width: w,
+      height: h,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+  }
+
+  async screenshot(quality) {
+    const result = await this.send("Page.captureScreenshot", {
+      format: "jpeg",
+      quality,
+    });
+    return Buffer.from(result.data, "base64");
+  }
+
+  async enable() {
+    await this.send("Page.enable");
+    await this.send("Runtime.enable");
+    await this.send("Network.enable");
   }
 
   close() {
-    this.ws.close();
+    try {
+      this.ws.close();
+    } catch {}
+    try {
+      this.proc.kill("SIGKILL");
+    } catch {}
   }
 }
 
-export async function connect(wsUrl) {
-  const session = new Session(wsUrl);
-  await session.ready;
-  return session;
-}
-
-/** Evaluate JS in the page and return its value (awaitPromise for promises). */
-export async function evaluate(session, expression) {
-  const reply = await session.send('Runtime.evaluate', {
-    expression,
-    awaitPromise: true,
-    returnByValue: true,
+export async function launchChromium({ port, userDataDir, width, height }) {
+  mkdirSync(userDataDir, { recursive: true });
+  const args = [
+    "--headless=new",
+    "--no-sandbox",
+    "--disable-gpu",
+    "--hide-scrollbars",
+    `--remote-debugging-port=${port}`,
+    `--user-data-dir=${userDataDir}`,
+    `--window-size=${width},${height}`,
+    "about:blank",
+  ];
+  const proc = spawn(CHROME, args, { stdio: "ignore" });
+  await fetchJson(`http://127.0.0.1:${port}/json/version`);
+  const targets = await fetchJson(`http://127.0.0.1:${port}/json/list`);
+  const page = targets.find((t) => t.type === "page");
+  if (!page) throw new Error("No page target found");
+  const ws = new WebSocket(page.webSocketDebuggerUrl);
+  await new Promise((resolve, reject) => {
+    ws.onopen = resolve;
+    ws.onerror = reject;
   });
-  if (reply.exceptionDetails) {
-    throw new Error(`page evaluation failed: ${JSON.stringify(reply.exceptionDetails.exception?.description ?? reply.exceptionDetails.text)}`);
-  }
-  return reply.result?.value;
+  const cdp = new Cdp(ws, proc);
+  await cdp.enable();
+  return cdp;
 }
-
-/** Wait until `check` (an async function) returns truthy, or time out. */
-export async function waitFor(check, { timeout = 30000, interval = 250, label = 'condition' } = {}) {
-  const deadline = Date.now() + timeout;
-  for (;;) {
-    if (await check()) return;
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
-    await sleep(interval);
-  }
-}
-
-export { join };

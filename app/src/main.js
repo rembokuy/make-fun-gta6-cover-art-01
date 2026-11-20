@@ -1,469 +1,404 @@
-// The editor wiring: controls, canvas editing, scenes and exports.
-//
-// Everything the user sees on the page lives here. The design itself is in
-// state.js, the painting in cover.js; this file only connects the two to
-// the DOM and to the ?shot scenes the screenshot scripts use.
-//
-// Photos never leave this machine: uploads become object URLs and the
-// sample photos are served from this same folder. Nothing here fetches
-// anything from the network.
+// Editor wiring: controls, filmstrip, canvas editing, export, and the
+// deterministic ?shot scenes used for screenshots.
 
-import { LAYOUTS, findLayout, slotCount, panelRects } from './layouts.js';
-import { GRADES, findGrade } from './grades.js';
-import { freshDesign, normalisePanels, createHistory, snapshot } from './state.js';
-import { renderCover, titleBandHeight } from './cover.js';
-import { EXPORT_SIZES, downloadCover, downloadAllSizes } from './export.js';
-import { sceneFromQuery, parseExportSize, markReady } from './shots.js';
+import { LAYOUTS, findLayout, panelRects, slotCount } from "./layouts.js";
+import { GRADES, findGrade } from "./grades.js";
+import { createHistory, emptyPanel, freshDesign, normalisePanels, snapshot } from "./state.js";
+import { renderCover, titleBandHeight } from "./cover.js";
+import { EXPORT_SIZES, downloadAllSizes, downloadCover } from "./export.js";
+import { markReady, parseExportSize, sceneFromQuery } from "./shots.js";
 
-const $ = (id) => document.getElementById(id);
-
-// Preview canvas size per aspect ratio.
 const PREVIEW = {
   square: { w: 900, h: 900 },
   portrait: { w: 720, h: 900 },
   wide: { w: 960, h: 540 },
 };
 
-const stage = $('stage');
-const ctx = stage.getContext('2d');
-const statusEl = $('status');
+const $ = (sel) => document.querySelector(sel);
+const stage = $("#stage");
+const ctx = stage.getContext("2d");
+const statusEl = $("#status");
+const history = createHistory(60);
 
-let photos = []; // { img, name } — images loaded from samples or uploads
+const hasScene = new URLSearchParams(location.search).has("shot");
+const scene = hasScene ? sceneFromQuery(location.search) : null;
+
+let photos = [];
 let design = freshDesign(0);
 let selected = 0;
-let aspect = 'square';
-let sceneMode = false;
-const history = createHistory();
+let aspect = "square";
+let lastWheelPush = 0;
 
-function setStatus(text) {
-  statusEl.textContent = text;
+function setStatus(msg) {
+  statusEl.textContent = msg;
 }
 
-function previewSize() {
-  return PREVIEW[aspect] ?? PREVIEW.square;
+function clamp(v, lo, hi) {
+  return Math.min(hi, Math.max(lo, v));
 }
-
-function render() {
-  const { w, h } = previewSize();
-  if (stage.width !== w) stage.width = w;
-  if (stage.height !== h) stage.height = h;
-  const images = photos.map((p) => p.img);
-  renderCover(ctx, w, h, design, images, sceneMode ? -1 : selected);
-  syncUndoButtons();
-}
-
-function syncUndoButtons() {
-  $('undo').disabled = !history.canUndo;
-  $('redo').disabled = !history.canRedo;
-}
-
-function syncControls() {
-  document.querySelectorAll('#layouts button').forEach((b) => {
-    b.classList.toggle('active', b.dataset.layout === design.layout);
-    b.setAttribute('aria-pressed', b.dataset.layout === design.layout ? 'true' : 'false');
-  });
-  document.querySelectorAll('#grades button').forEach((b) => {
-    b.classList.toggle('active', b.dataset.grade === design.grade);
-    b.setAttribute('aria-pressed', b.dataset.grade === design.grade ? 'true' : 'false');
-  });
-  document.querySelectorAll('#aspects button').forEach((b) => {
-    b.classList.toggle('active', b.dataset.aspect === aspect);
-    b.setAttribute('aria-pressed', b.dataset.aspect === aspect ? 'true' : 'false');
-  });
-  $('title').value = design.title;
-  $('subtitle').value = design.subtitle;
-  $('badge').value = design.badge;
-  $('grain').checked = design.grain;
-  $('vignette').checked = design.vignette;
-  $('halftone').checked = design.halftone;
-  document.querySelectorAll('#filmstrip img').forEach((img, i) => {
-    img.classList.toggle('in-panel', design.panels[selected]?.photo === i);
-  });
-}
-
-// ------------------------------------------------------------------ photos
 
 function loadImage(src) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error(`cannot load ${src}`));
+    img.onerror = () => resolve(null);
     img.src = src;
   });
 }
 
-async function loadSamples(names) {
-  for (const name of names) {
-    try {
-      const img = await loadImage(`./samples/${name}.jpg`);
-      photos.push({ img, name });
-    } catch {
-      setStatus(`Sample photo ${name} could not be loaded.`);
-    }
+async function loadFonts() {
+  try {
+    await Promise.all([
+      document.fonts.load("40px Anton"),
+      document.fonts.load("40px Pacifico"),
+    ]);
+  } catch {
+    // Fall back to system fonts; the cover still renders.
   }
-  buildFilmstrip();
 }
 
-function buildFilmstrip() {
-  const strip = $('filmstrip');
-  strip.innerHTML = '';
-  photos.forEach((photo, i) => {
-    const thumb = document.createElement('img');
-    thumb.src = photo.img.src;
-    thumb.alt = photo.name;
-    thumb.width = 64;
-    thumb.height = 64;
-    thumb.addEventListener('click', () => {
+function render() {
+  const size = PREVIEW[aspect];
+  stage.width = size.w;
+  stage.height = size.h;
+  renderCover(ctx, size.w, size.h, design, photos, scene && scene.shot === "cover" ? -1 : selected);
+  updateUndoButtons();
+}
+
+function updateUndoButtons() {
+  $("#undo").disabled = !history.canUndo;
+  $("#redo").disabled = !history.canRedo;
+}
+
+function syncControls() {
+  $("#title").value = design.title;
+  $("#subtitle").value = design.subtitle;
+  $("#badge").value = design.badge;
+  $("#grain").checked = design.grain;
+  $("#vignette").checked = design.vignette;
+  $("#halftone").checked = design.halftone;
+  document.querySelectorAll("#layouts button").forEach((b) => {
+    b.classList.toggle("active", b.dataset.layout === design.layout);
+  });
+  document.querySelectorAll("#grades button").forEach((b) => {
+    b.classList.toggle("active", b.dataset.grade === design.grade);
+  });
+  document.querySelectorAll("#aspects button").forEach((b) => {
+    b.classList.toggle("active", b.dataset.aspect === aspect);
+  });
+}
+
+function buildLayoutPicker() {
+  const box = $("#layouts");
+  box.innerHTML = "";
+  for (const layout of LAYOUTS) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = layout.name;
+    b.dataset.layout = layout.id;
+    b.addEventListener("click", () => {
+      if (design.layout === layout.id) return;
       history.push(design);
-      const panel = design.panels[selected];
-      if (!panel) return;
-      panel.photo = i;
-      panel.zoom = 1;
-      panel.ox = 0;
-      panel.oy = 0;
-      setStatus(`Put ${photo.name} in panel ${selected + 1}.`);
+      design.layout = layout.id;
+      normalisePanels(design);
+      selected = clamp(selected, 0, slotCount(layout.id) - 1);
       syncControls();
       render();
+    });
+    box.appendChild(b);
+  }
+}
+
+function gradeGradient(grade) {
+  const stops = grade.stops;
+  const first = stops[0];
+  const mid = stops[Math.floor(stops.length / 2)];
+  const last = stops[stops.length - 1];
+  const rgb = (s) => `rgb(${s[1]},${s[2]},${s[3]})`;
+  return `linear-gradient(135deg, ${rgb(first)}, ${rgb(mid)}, ${rgb(last)})`;
+}
+
+function buildGradePicker() {
+  const box = $("#grades");
+  box.innerHTML = "";
+  for (const grade of GRADES) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "swatch";
+    b.title = grade.name;
+    b.dataset.grade = grade.id;
+    b.style.background = gradeGradient(grade);
+    const label = document.createElement("span");
+    label.textContent = grade.name;
+    b.appendChild(label);
+    b.addEventListener("click", () => {
+      if (design.grade === grade.id) return;
+      history.push(design);
+      design.grade = grade.id;
+      syncControls();
+      render();
+    });
+    box.appendChild(b);
+  }
+}
+
+function buildExportOne() {
+  const box = $("#export-one");
+  box.innerHTML = "";
+  for (const size of EXPORT_SIZES) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = `${size.label} PNG`;
+    b.addEventListener("click", async () => {
+      setStatus(`Exporting ${size.label}…`);
+      const name = await downloadCover(design, photos, size);
+      setStatus(name ? `Exported ${name}` : "Export failed.");
+    });
+    box.appendChild(b);
+  }
+}
+
+function rebuildFilmstrip() {
+  const strip = $("#filmstrip");
+  strip.innerHTML = "";
+  photos.forEach((photo, i) => {
+    const thumb = document.createElement("img");
+    thumb.src = photo.src;
+    thumb.alt = `Photo ${i + 1}`;
+    thumb.width = 64;
+    thumb.height = 64;
+    thumb.addEventListener("click", () => {
+      history.push(design);
+      const panel = design.panels[selected] || emptyPanel();
+      design.panels[selected] = { ...panel, photo: i, zoom: 1, ox: 0, oy: 0 };
+      render();
+      setStatus(`Photo ${i + 1} placed in panel ${selected + 1}.`);
     });
     strip.appendChild(thumb);
   });
 }
 
-// ------------------------------------------------------------------ pickers
-
-function buildPickers() {
-  const layoutsEl = $('layouts');
-  for (const layout of LAYOUTS) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.textContent = layout.name;
-    button.dataset.layout = layout.id;
-    button.addEventListener('click', () => {
-      history.push(design);
-      design.layout = layout.id;
-      normalisePanels(design, slotCount(layout.id));
-      if (selected >= slotCount(layout.id)) selected = 0;
-      setStatus(`Layout: ${layout.name}.`);
-      syncControls();
-      render();
-    });
-    layoutsEl.appendChild(button);
-  }
-
-  const gradesEl = $('grades');
-  for (const grade of GRADES) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.dataset.grade = grade.id;
-    button.title = grade.name;
-    button.setAttribute('aria-label', grade.name);
-    const [first, mid, last] = [grade.stops[0], grade.stops[2], grade.stops[4]];
-    const css = (stop) => `rgb(${stop[1]},${stop[2]},${stop[3]})`;
-    button.style.background = `linear-gradient(135deg, ${css(first)}, ${css(mid)}, ${css(last)})`;
-    const label = document.createElement('span');
-    label.textContent = grade.name;
-    button.appendChild(label);
-    button.addEventListener('click', () => {
-      history.push(design);
-      design.grade = grade.id;
-      setStatus(`Grade: ${grade.name}.`);
-      syncControls();
-      render();
-    });
-    gradesEl.appendChild(button);
-  }
-
-  const aspectsEl = $('aspects');
-  for (const size of EXPORT_SIZES) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.textContent = size.name;
-    button.dataset.aspect = size.id;
-    button.addEventListener('click', () => {
-      aspect = size.id;
-      setStatus(`Preview: ${size.name} ${size.w}×${size.h}.`);
-      syncControls();
-      render();
-    });
-    aspectsEl.appendChild(button);
-  }
-
-  const oneEl = $('export-one');
-  for (const size of EXPORT_SIZES) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.textContent = `PNG ${size.name}`;
-    button.addEventListener('click', async () => {
-      setStatus(`Exporting ${size.name}…`);
-      const name = await downloadCover(size, design, photos.map((p) => p.img));
-      setStatus(`Saved ${name}.`);
-    });
-    oneEl.appendChild(button);
-  }
-}
-
-// ------------------------------------------------------------------ controls
-
-function bindControls() {
-  $('upload').addEventListener('change', (event) => {
-    const files = [...event.target.files];
-    for (const file of files) {
-      const url = URL.createObjectURL(file);
-      const img = new Image();
-      img.onload = () => {
-        photos.push({ img, name: file.name.replace(/\.[^.]+$/, '') });
-        buildFilmstrip();
-        render();
-      };
-      img.src = url;
-    }
-    event.target.value = '';
-    if (files.length > 0) setStatus(`Added ${files.length} photo${files.length > 1 ? 's' : ''}.`);
-  });
-
-  $('fill-all').addEventListener('click', () => {
-    const panel = design.panels[selected];
-    if (!panel || panel.photo < 0) {
-      setStatus('Select a panel with a photo first.');
-      return;
-    }
-    history.push(design);
-    for (const p of design.panels) p.photo = panel.photo;
-    setStatus('Filled all panels with the selected photo.');
-    render();
-  });
-
-  $('clear-panel').addEventListener('click', () => {
-    const panel = design.panels[selected];
-    if (!panel) return;
-    history.push(design);
-    panel.photo = -1;
-    panel.zoom = 1;
-    panel.ox = 0;
-    panel.oy = 0;
-    setStatus(`Cleared panel ${selected + 1}.`);
-    syncControls();
-    render();
-  });
-
-  // Caption fields: redraw as you type; the history entry is the design
-  // as it was when the field got focus, stored on focus and pushed when
-  // the edit is committed (change), so undo restores the old caption.
-  for (const [id, key] of [['title', 'title'], ['subtitle', 'subtitle'], ['badge', 'badge']]) {
-    const input = $(id);
-    let before = null;
-    input.addEventListener('focus', () => {
-      before = snapshot(design);
-    });
-    input.addEventListener('input', () => {
-      design[key] = input.value;
-      render();
-    });
-    input.addEventListener('change', () => {
-      if (before) history.push(before);
-      before = null;
-      syncUndoButtons();
-    });
-  }
-
-  for (const [id, key] of [['grain', 'grain'], ['vignette', 'vignette'], ['halftone', 'halftone']]) {
-    $(id).addEventListener('change', (event) => {
-      history.push(design);
-      design[key] = event.target.checked;
-      render();
-    });
-  }
-
-  $('undo').addEventListener('click', doUndo);
-  $('redo').addEventListener('click', doRedo);
-
-  document.addEventListener('keydown', (event) => {
-    const target = event.target;
-    if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
-    if ((event.ctrlKey || event.metaKey) && (event.key === 'z' || event.key === 'Z')) {
-      event.preventDefault();
-      if (event.shiftKey) doRedo();
-      else doUndo();
-    }
-  });
-
-  $('export-all').addEventListener('click', async () => {
-    setStatus('Exporting all 3 sizes…');
-    const names = await downloadAllSizes(design, photos.map((p) => p.img), (name) => {
-      setStatus(`Saved ${name}.`);
-    });
-    setStatus(`Exported ${names.length} files: ${names.join(', ')}.`);
-  });
-}
-
-function doUndo() {
-  const previous = history.undo(design);
-  if (previous) {
-    design = previous;
-    normalisePanels(design, slotCount(design.layout));
-    setStatus('Undid.');
-    syncControls();
-    render();
-  }
-}
-
-function doRedo() {
-  const next = history.redo(design);
-  if (next) {
-    design = next;
-    normalisePanels(design, slotCount(design.layout));
-    setStatus('Redid.');
-    syncControls();
-    render();
-  }
-}
-
-// ------------------------------------------------------------------ canvas editing
-
-function canvasPoint(event) {
-  const box = stage.getBoundingClientRect();
-  const { w, h } = previewSize();
+function canvasPoint(e) {
+  const rect = stage.getBoundingClientRect();
   return {
-    x: ((event.clientX - box.left) / box.width) * w,
-    y: ((event.clientY - box.top) / box.height) * h,
+    x: ((e.clientX - rect.left) / rect.width) * stage.width,
+    y: ((e.clientY - rect.top) / rect.height) * stage.height,
   };
 }
 
-function currentRects() {
-  const { w, h } = previewSize();
-  const bandH = design.layout === 'full' ? 0 : titleBandHeight(h);
-  return panelRects(design.layout, w, h, bandH);
-}
-
-function hitPanel(point) {
-  const rects = currentRects();
-  // Topmost first: later panels paint over earlier ones.
+function hitPanel(p) {
+  const rects = panelRects(design.layout, stage.width, stage.height, titleBandHeight(stage.height));
   for (let i = rects.length - 1; i >= 0; i--) {
     const r = rects[i];
-    if (point.x >= r.x && point.x <= r.x + r.w && point.y >= r.y && point.y <= r.y + r.h) return i;
+    if (p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h) return i;
   }
   return -1;
 }
 
-function bindCanvas() {
-  let dragging = false;
-  let dragPanel = -1;
-  let lastX = 0;
-  let lastY = 0;
-  let moved = false;
-  let lastWheelPush = 0;
+let drag = null;
 
-  stage.addEventListener('pointerdown', (event) => {
-    const point = canvasPoint(event);
-    const hit = hitPanel(point);
-    if (hit < 0) return;
-    selected = hit;
-    dragPanel = hit;
-    dragging = true;
-    moved = false;
-    lastX = point.x;
-    lastY = point.y;
+stage.addEventListener("pointerdown", (e) => {
+  const p = canvasPoint(e);
+  const hit = hitPanel(p);
+  if (hit < 0) return;
+  selected = hit;
+  const rects = panelRects(design.layout, stage.width, stage.height, titleBandHeight(stage.height));
+  drag = { panel: hit, rect: rects[hit], lastX: p.x, lastY: p.y, moved: false };
+  history.push(design);
+  stage.setPointerCapture(e.pointerId);
+  render();
+});
+
+stage.addEventListener("pointermove", (e) => {
+  if (!drag) return;
+  const p = canvasPoint(e);
+  const dx = p.x - drag.lastX;
+  const dy = p.y - drag.lastY;
+  drag.lastX = p.x;
+  drag.lastY = p.y;
+  if (Math.abs(dx) + Math.abs(dy) > 0.5) drag.moved = true;
+  const panel = design.panels[drag.panel];
+  if (!panel || panel.photo < 0) return;
+  panel.ox = clamp(panel.ox + dx / drag.rect.w, -0.6, 0.6);
+  panel.oy = clamp(panel.oy + dy / drag.rect.h, -0.6, 0.6);
+  render();
+});
+
+stage.addEventListener("pointerup", () => {
+  drag = null;
+});
+
+stage.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const p = canvasPoint(e);
+  const hit = hitPanel(p);
+  if (hit < 0) return;
+  const panel = design.panels[hit];
+  if (!panel || panel.photo < 0) return;
+  const now = Date.now();
+  if (now - lastWheelPush > 450) {
     history.push(design);
-    stage.setPointerCapture(event.pointerId);
-    stage.style.cursor = 'grabbing';
-    syncControls();
-    render();
-  });
+    lastWheelPush = now;
+  }
+  const factor = Math.exp(-e.deltaY * 0.0012);
+  panel.zoom = clamp(panel.zoom * factor, 1, 3.5);
+  selected = hit;
+  render();
+}, { passive: false });
 
-  stage.addEventListener('pointermove', (event) => {
-    if (!dragging || dragPanel < 0) return;
-    const point = canvasPoint(event);
-    const rects = currentRects();
-    const rect = rects[dragPanel];
-    const panel = design.panels[dragPanel];
-    if (!rect || !panel || panel.photo < 0) return;
-    panel.ox = Math.max(-0.6, Math.min(0.6, panel.ox + (point.x - lastX) / rect.w));
-    panel.oy = Math.max(-0.6, Math.min(0.6, panel.oy + (point.y - lastY) / rect.h));
-    if (point.x !== lastX || point.y !== lastY) moved = true;
-    lastX = point.x;
-    lastY = point.y;
-    render();
-  });
-
-  const endDrag = () => {
-    dragging = false;
-    dragPanel = -1;
-    stage.style.cursor = 'grab';
-  };
-  stage.addEventListener('pointerup', endDrag);
-  stage.addEventListener('pointercancel', endDrag);
-
-  stage.addEventListener('wheel', (event) => {
-    event.preventDefault();
-    const point = canvasPoint(event);
-    const hit = hitPanel(point);
-    if (hit < 0) return;
-    const panel = design.panels[hit];
-    if (!panel || panel.photo < 0) return;
-    // One history entry per scroll burst, not one per wheel tick.
-    const now = Date.now();
-    if (now - lastWheelPush > 450) {
-      history.push(design);
-      lastWheelPush = now;
+function bindControls() {
+  $("#upload").addEventListener("change", async (e) => {
+    const files = [...e.target.files];
+    for (const file of files) {
+      const url = URL.createObjectURL(file);
+      const img = await loadImage(url);
+      if (img) {
+        photos.push(img);
+        rebuildFilmstrip();
+      }
     }
-    const factor = Math.exp(-event.deltaY * 0.0012);
-    panel.zoom = Math.max(1, Math.min(3.5, panel.zoom * factor));
-    selected = hit;
-    syncControls();
+    if (files.length) {
+      render();
+      setStatus(`${files.length} photo(s) added.`);
+    }
+    e.target.value = "";
+  });
+
+  $("#fill-all").addEventListener("click", () => {
+    const src = design.panels[selected];
+    if (!src || src.photo < 0) {
+      setStatus("Select a panel with a photo first.");
+      return;
+    }
+    history.push(design);
+    const count = slotCount(design.layout);
+    for (let i = 0; i < count; i++) {
+      design.panels[i] = { ...src };
+    }
     render();
-  }, { passive: false });
-}
+    setStatus("All panels filled with the selected photo.");
+  });
 
-// ------------------------------------------------------------------ boot
+  $("#clear-panel").addEventListener("click", () => {
+    history.push(design);
+    design.panels[selected] = emptyPanel();
+    render();
+    setStatus(`Panel ${selected + 1} cleared.`);
+  });
 
-async function boot() {
-  buildPickers();
-  bindControls();
-  bindCanvas();
-
-  // Load the display fonts; the canvas falls back to system fonts when
-  // they cannot load, so a failure never blocks the editor.
-  try {
-    await document.fonts.load('40px Anton');
-    await document.fonts.load('40px Pacifico');
-  } catch {
-    // Fallbacks in the canvas font stacks cover this.
+  const captionBefore = {};
+  for (const key of ["title", "subtitle", "badge"]) {
+    const input = $(`#${key}`);
+    input.addEventListener("focus", () => {
+      captionBefore[key] = design[key];
+    });
+    input.addEventListener("input", () => {
+      design[key] = input.value;
+      render();
+    });
+    input.addEventListener("change", () => {
+      const before = { ...design, [key]: captionBefore[key] ?? design[key] };
+      history.push(before);
+      design[key] = input.value;
+      render();
+    });
   }
 
-  const params = new URLSearchParams(window.location.search);
-  if (params.has('shot')) {
-    sceneMode = true;
-    const scene = sceneFromQuery(window.location.search);
-    await loadSamples(scene.photos);
-    design = freshDesign(photos.length);
+  for (const key of ["grain", "vignette", "halftone"]) {
+    $(`#${key}`).addEventListener("change", (e) => {
+      history.push(design);
+      design[key] = e.target.checked;
+      render();
+    });
+  }
+
+  document.querySelectorAll("#aspects button").forEach((b) => {
+    b.addEventListener("click", () => {
+      aspect = b.dataset.aspect;
+      syncControls();
+      render();
+    });
+  });
+
+  $("#undo").addEventListener("click", doUndo);
+  $("#redo").addEventListener("click", doRedo);
+
+  $("#export-all").addEventListener("click", async () => {
+    setStatus("Exporting all 3 sizes…");
+    const saved = await downloadAllSizes(design, photos, (name) => {
+      setStatus(`Exported ${name}…`);
+    });
+    setStatus(saved.length ? `Exported ${saved.join(", ")}` : "Export failed.");
+  });
+
+  window.addEventListener("keydown", (e) => {
+    const tag = (e.target.tagName || "").toLowerCase();
+    if (tag === "input" || tag === "textarea") return;
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+      e.preventDefault();
+      if (e.shiftKey) doRedo();
+      else doUndo();
+    }
+  });
+}
+
+function doUndo() {
+  const prev = history.undo(design);
+  if (!prev) return;
+  design = prev;
+  selected = clamp(selected, 0, slotCount(design.layout) - 1);
+  syncControls();
+  render();
+}
+
+function doRedo() {
+  const next = history.redo(design);
+  if (!next) return;
+  design = next;
+  selected = clamp(selected, 0, slotCount(design.layout) - 1);
+  syncControls();
+  render();
+}
+
+async function init() {
+  buildLayoutPicker();
+  buildGradePicker();
+  buildExportOne();
+  bindControls();
+
+  const names = scene ? scene.photos : ["boulevard", "pier"];
+  for (const name of names) {
+    const img = await loadImage(`./samples/${name}.jpg`);
+    if (img) photos.push(img);
+  }
+  design = freshDesign(photos.length);
+  rebuildFilmstrip();
+
+  if (scene) {
     design.layout = findLayout(scene.layout).id;
     design.grade = findGrade(scene.grade).id;
     design.title = scene.title;
     design.subtitle = scene.subtitle;
     design.badge = scene.badge;
-    aspect = PREVIEW[scene.aspect] ? scene.aspect : 'square';
-    normalisePanels(design, slotCount(design.layout));
-    selected = -1;
-    if (scene.shot === 'cover') document.body.classList.add('shot-cover');
-    syncControls();
-    render();
+    normalisePanels(design);
+    if (scene.aspect in PREVIEW) aspect = scene.aspect;
+    if (scene.shot === "cover") document.body.classList.add("shot-cover");
+  }
+
+  await loadFonts();
+  syncControls();
+  render();
+
+  if (scene) {
     if (scene.autoexport) {
       const size = parseExportSize(scene.autoexport);
       if (size) {
-        await downloadCover(size, design, photos.map((p) => p.img));
+        await downloadCover(design, photos, size);
         window.__exportTriggered = true;
       }
     }
     markReady();
-    return;
   }
-
-  await loadSamples(['boulevard', 'pier']);
-  design = freshDesign(photos.length);
-  normalisePanels(design, slotCount(design.layout));
-  syncControls();
-  render();
-  setStatus('Ready.');
 }
 
-boot();
+init();
