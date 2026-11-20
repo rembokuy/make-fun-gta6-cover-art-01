@@ -1,46 +1,57 @@
-// Neon Coast Cover Studio — the hand-in program for gta6-cover-art-01.
+// main.ts — entrypoint penyerahan bounty "Make GTA 6 Cover Art" (make.fun).
 //
-// The app is plain static files under app/ (index.html, its ES modules,
-// vendored fonts and the two sample photos) that any static server can serve
-// offline. This program copies app/ and screenshots/ from beside this file
-// into the output directory and writes dossier.json there — the summary the
-// judge reads — using the vendored make.fun library in vendor/makefun-app.ts.
+// Program ini menyerahkan app cover-art ke direktori output beserta
+// dossier.json yang dibaca juri:
+//   - app/         : file statis offline (HTML/CSS/JS + aset) aplikasi
+//                    pembuat cover art GTA 6.
+//   - screenshots/ : tangkapan layar aplikasi (maks. 4) untuk juri.
+//   - dossier.json : dossier yang dibangun buildDossier dari isi output.
 //
-// Run it locally with:
-//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
-// Outside the grader, MAKEFUN_OUTPUT_DIR stands in for /output.
+// PENTING — jangan pernah menghapus direktori output:
+// Di grader, /output adalah mount milik root sementara program berjalan
+// sebagai user 65534 (nobody). Menghapus direktori itu akan gagal dengan
+// EACCES dan program keluar dengan exit code 1 (itulah yang membuat
+// round 1 entry ini ditolak grader). Grader selalu memberi direktori
+// output kosong yang segar, jadi cukup buat direktori itu bila belum ada
+// (mkdir rekursif) lalu salin file ke dalamnya.
 //
-// The output directory is only ever created, never deleted: in the grader
-// /output is a mount point owned by root while this program runs as user
-// 65534, so removing it would fail with EACCES. The grader hands us a fresh
-// directory, so there is nothing stale to clean up.
+// Hanya memakai stdlib Node: node:fs, node:path, node:url.
 
-import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { buildDossier } from './vendor/makefun-app.ts';
+import { cpSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const here = fileURLToPath(new URL('.', import.meta.url));
-const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+import { buildDossier } from "./vendor/makefun-app.ts";
 
-mkdirSync(out, { recursive: true });
-cpSync(join(here, 'app'), join(out, 'app'), { recursive: true });
-mkdirSync(join(out, 'screenshots'), { recursive: true });
-if (existsSync(join(here, 'screenshots'))) {
-  cpSync(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
+// Direktori repo: folder yang berisi file ini sendiri.
+const repoDir = dirname(fileURLToPath(import.meta.url));
+
+// Direktori output: dari env MAKEFUN_OUTPUT_DIR, default '/output'.
+const outputDir = process.env.MAKEFUN_OUTPUT_DIR ?? "/output";
+
+// Buat direktori output bila belum ada. Jangan pernah menghapusnya.
+mkdirSync(outputDir, { recursive: true });
+
+// Salin app/ dari repo ke dalam output (rekursif).
+cpSync(join(repoDir, "app"), join(outputDir, "app"), { recursive: true });
+
+// Buat screenshots/ di output dulu (agar direktori ini selalu ada untuk
+// dossier, sekalipun repo tidak membawa screenshot), lalu salin
+// screenshots/ dari repo (rekursif) hanya bila ada di repo.
+mkdirSync(join(outputDir, "screenshots"), { recursive: true });
+const repoScreenshots = join(repoDir, "screenshots");
+if (existsSync(repoScreenshots)) {
+  cpSync(repoScreenshots, join(outputDir, "screenshots"), { recursive: true });
 }
 
-// The scorer's own caps: dossier text at most 160 KiB, screenshots at most
-// 4 files of 256 KiB each, app/ at most 993 files and 48 MiB in all.
-writeFileSync(
-  join(out, 'dossier.json'),
-  buildDossier(out, {
-    text_max_bytes: 163840,
-    screenshots: { max: 4, max_bytes: 262144 },
-    app_max_files: 993,
-    app_max_bytes: 50331648,
-    app_path_max_bytes: 1000,
-  }),
-);
+// Bangun dossier.json dari isi output dan tulis ke output.
+const dossier = buildDossier(outputDir, {
+  text_max_bytes: 163840,
+  screenshots: { max: 4, max_bytes: 262144 },
+  app_max_files: 993,
+  app_max_bytes: 50331648,
+  app_path_max_bytes: 1000,
+});
+writeFileSync(join(outputDir, "dossier.json"), dossier);
 
-console.log(`Neon Coast Cover Studio handed in to ${out}`);
+console.log(`Cover art app diserahkan ke ${outputDir}`);
