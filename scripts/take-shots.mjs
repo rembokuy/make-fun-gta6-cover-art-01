@@ -1,114 +1,119 @@
-// Take the four screenshots listed in shots.json.
-// Usage: run while `node serve.ts` serves http://localhost:8080.
-// Exits 1 when a shot fails, a console error or exception appears, or any
-// request leaves localhost.
+// Take the four dossier screenshots from shots.json.
+//
+// Usage: node serve.ts must already be running on http://localhost:8080,
+// then `node scripts/take-shots.mjs`. Each shot opens its query in a fresh
+// headless Chromium tab at the shot's viewport, waits for
+// window.__shotReady, and captures a JPEG that fits the 262144-byte cap
+// (quality starts at 88 and drops by 8, down to 55).
+//
+// The run fails (exit 1) when a shot errors, a page exception or console
+// error appears, or the app requests anything outside localhost.
 
-import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { waitForHttp, createTarget, closeTarget, connectWs, Session, sleep } from './cdp.mjs';
+import { launchChrome, newTab, connect, evaluate, waitFor } from './cdp.mjs';
 
-const repoDir = resolve(join(fileURLToPath(import.meta.url), '..', '..'));
-const shots = JSON.parse(readFileSync(join(repoDir, 'shots.json'), 'utf8'));
-const outDir = join(repoDir, 'screenshots');
-const profileDir = join(repoDir, 'shots-tmp', 'profile');
-const chromePath = join(homedir(), '.cache/ms-playwright/chromium-1255/chrome-linux64/chrome');
+const repoDir = dirname(dirname(fileURLToPath(import.meta.url)));
+const shotsDir = join(repoDir, 'screenshots');
+const tmpDir = join(repoDir, 'shots-tmp');
+const profileDir = join(tmpDir, 'profile');
 const PORT = 9222;
-const BASE = 'http://localhost:8080';
 const MAX_BYTES = 262144;
 
-mkdirSync(outDir, { recursive: true });
-mkdirSync(profileDir, { recursive: true });
+const shots = JSON.parse(readFileSync(join(repoDir, 'shots.json'), 'utf8'));
 
-const report = { shots: [], exceptions: [], consoleErrors: [], externalRequests: [] };
-let failed = false;
+const results = [];
+const problems = [];
 
-const chrome = spawn(chromePath, [
-  '--headless=new',
-  '--no-sandbox',
-  '--disable-gpu',
-  '--hide-scrollbars',
-  `--remote-debugging-port=${PORT}`,
-  `--user-data-dir=${profileDir}`,
-  'about:blank',
-], { stdio: 'ignore' });
+async function captureShot(session, shot) {
+  const errors = [];
+  const exceptions = [];
+  const external = [];
+
+  session.on('Runtime.exceptionThrown', (params) => {
+    exceptions.push(params.exceptionDetails?.exception?.description ?? params.exceptionDetails?.text ?? 'exception');
+  });
+  session.on('Runtime.consoleAPICalled', (params) => {
+    if (params.type === 'error') {
+      errors.push(params.args.map((a) => a.value ?? a.description ?? '').join(' '));
+    }
+  });
+  session.on('Network.requestWillBeSent', (params) => {
+    const url = params.request?.url ?? '';
+    try {
+      const host = new URL(url).hostname;
+      if (host !== 'localhost' && host !== '127.0.0.1') external.push(url);
+    } catch {
+      // A URL we cannot parse is not a network request we can judge.
+    }
+  });
+
+  await session.send('Page.enable');
+  await session.send('Runtime.enable');
+  await session.send('Network.enable');
+  await session.send('Emulation.setDeviceMetricsOverride', {
+    width: shot.w,
+    height: shot.h,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+
+  await waitFor(async () => {
+    try {
+      return (await evaluate(session, 'window.__shotReady === true')) === true;
+    } catch {
+      return false;
+    }
+  }, { timeout: 30000, label: `__shotReady for ${shot.name}` });
+
+  // Capture, lowering the quality until the file fits the byte cap.
+  let quality = 88;
+  let bytes = null;
+  for (;;) {
+    const { data } = await session.send('Page.captureScreenshot', { format: 'jpeg', quality });
+    const buf = Buffer.from(data, 'base64');
+    if (buf.length <= MAX_BYTES || quality <= 55) {
+      bytes = buf;
+      break;
+    }
+    quality -= 8;
+  }
+  writeFileSync(join(shotsDir, shot.name), bytes);
+  return { name: shot.name, bytes: bytes.length, quality, w: shot.w, h: shot.h, errors, exceptions, external };
+}
 
 async function main() {
-  await waitForHttp(PORT, '/json/version', 20000);
-
-  for (const shot of shots) {
-    const url = `${BASE}/?${shot.query}`;
-    const target = await createTarget(PORT, 'about:blank');
-    const ws = await connectWs(target.webSocketDebuggerUrl);
-    const session = new Session(ws);
-
-    session.on('Runtime.exceptionThrown', (params) => {
-      const detail = params.exceptionDetails?.exception?.description ?? params.exceptionDetails?.text ?? 'unknown';
-      report.exceptions.push({ shot: shot.name, detail: String(detail).slice(0, 500) });
-    });
-    session.on('Runtime.consoleAPICalled', (params) => {
-      if (params.type === 'error') {
-        report.consoleErrors.push({ shot: shot.name, text: params.args.map((a) => a.value ?? a.description ?? '').join(' ').slice(0, 500) });
-      }
-    });
-    session.on('Network.requestWillBeSent', (params) => {
+  mkdirSync(shotsDir, { recursive: true });
+  mkdirSync(tmpDir, { recursive: true });
+  const chrome = await launchChrome({ port: PORT, profile: profileDir });
+  try {
+    for (const shot of shots) {
+      const url = `http://localhost:8080/${shot.query}`;
+      const target = await newTab(PORT, url);
+      const session = await connect(target.webSocketDebuggerUrl);
       try {
-        const host = new URL(params.request.url).hostname;
-        if (host !== 'localhost' && host !== '127.0.0.1') {
-          report.externalRequests.push({ shot: shot.name, url: params.request.url });
-        }
-      } catch { /* ignore unparseable urls */ }
-    });
-
-    try {
-      await session.send('Page.enable');
-      await session.send('Runtime.enable');
-      await session.send('Network.enable');
-      await session.send('Emulation.setDeviceMetricsOverride', {
-        width: shot.w, height: shot.h, deviceScaleFactor: 1, mobile: false,
-      });
-      await session.send('Page.navigate', { url });
-      const ready = await session.waitFor('window.__shotReady === true', 30000);
-      if (!ready) throw new Error('timed out waiting for window.__shotReady');
-
-      let quality = 88;
-      let bytes = null;
-      let data = null;
-      for (;;) {
-        const shotResult = await session.send('Page.captureScreenshot', { format: 'jpeg', quality });
-        data = Buffer.from(shotResult.data, 'base64');
-        bytes = data.length;
-        if (bytes <= MAX_BYTES || quality <= 55) break;
-        quality -= 8;
+        const result = await captureShot(session, shot);
+        results.push(result);
+        if (result.errors.length > 0) problems.push(`${shot.name}: console errors: ${result.errors.join(' | ')}`);
+        if (result.exceptions.length > 0) problems.push(`${shot.name}: exceptions: ${result.exceptions.join(' | ')}`);
+        if (result.external.length > 0) problems.push(`${shot.name}: external requests: ${result.external.join(' | ')}`);
+      } finally {
+        session.close();
       }
-      writeFileSync(join(outDir, shot.name), data);
-      report.shots.push({ name: shot.name, bytes, quality, w: shot.w, h: shot.h });
-      if (bytes > MAX_BYTES) {
-        failed = true;
-        report.shots[report.shots.length - 1].error = `over byte cap at minimum quality: ${bytes} > ${MAX_BYTES}`;
-      }
-    } catch (err) {
-      failed = true;
-      report.shots.push({ name: shot.name, error: err.message, w: shot.w, h: shot.h });
-    } finally {
-      ws.socket.destroy();
-      await closeTarget(PORT, target.id);
-      await sleep(300);
     }
+  } finally {
+    chrome.kill();
+  }
+
+  console.log(JSON.stringify({ shots: results, problems }, null, 2));
+  if (problems.length > 0) {
+    console.error(`FAILED: ${problems.length} problem(s)`);
+    process.exit(1);
   }
 }
 
-try {
-  await main();
-} catch (err) {
-  failed = true;
-  report.fatal = err.message;
-} finally {
-  chrome.kill('SIGKILL');
-}
-
-if (report.exceptions.length > 0 || report.consoleErrors.length > 0 || report.externalRequests.length > 0) failed = true;
-console.log(JSON.stringify(report, null, 2));
-process.exit(failed ? 1 : 0);
+main().catch((err) => {
+  console.error(`FAILED: ${err.message}`);
+  process.exit(1);
+});

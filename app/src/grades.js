@@ -1,6 +1,9 @@
-// Colour grades for Neon Coast Cover Studio.
-// A grade is five stops [position 0..1, R, G, B]; a pixel's luminance picks
-// its colour from the gradient the stops describe.
+// Grades: the neon colour maps that give a cover its sunset look.
+//
+// A grade is { id, name, stops } where stops is a list of five
+// [position, r, g, b] points from 0 to 1. A photo is graded by its
+// brightness: buildLut turns the stops into a 256-entry lookup table per
+// channel, and applyLut repaints an ImageData through that table.
 
 export const GRADES = [
   {
@@ -29,12 +32,16 @@ export const GRADES = [
   },
 ];
 
+/** Find a grade by id; an unknown id falls back to the first grade. */
 export function findGrade(id) {
-  return GRADES.find((grade) => grade.id === id) ?? GRADES[0];
+  return GRADES.find((g) => g.id === id) ?? GRADES[0];
 }
 
-// Build a 256-entry lookup table per channel: for each brightness level
-// 0..255, linearly interpolate between the two stops that bracket it.
+/**
+ * Build the lookup tables for a grade: for every brightness level 0..255,
+ * linearly interpolate between the two stops that bracket it. Returns
+ * { r, g, b } arrays of 256 entries each.
+ */
 export function buildLut(grade) {
   const lut = { r: new Uint8Array(256), g: new Uint8Array(256), b: new Uint8Array(256) };
   const stops = grade.stops;
@@ -49,8 +56,8 @@ export function buildLut(grade) {
         break;
       }
     }
-    const span = b[0] - a[0];
-    const f = span === 0 ? 0 : (t - a[0]) / span;
+    const span = b[0] - a[0] || 1;
+    const f = Math.min(1, Math.max(0, (t - a[0]) / span));
     lut.r[level] = Math.round(a[1] + (b[1] - a[1]) * f);
     lut.g[level] = Math.round(a[2] + (b[2] - a[2]) * f);
     lut.b[level] = Math.round(a[3] + (b[3] - a[3]) * f);
@@ -58,20 +65,22 @@ export function buildLut(grade) {
   return lut;
 }
 
-// Recolour ImageData in place. A pixel's luminance picks its graded
-// colour from the table, then 8% of the original colour is mixed back in
-// so the result is a grade, not a pure duotone.
+// How much of the original colour survives grading, so a photo reads as a
+// graded photo rather than a flat duotone.
+const KEEP = 0.08;
+
+/**
+ * Repaint an ImageData in place through a grade's lookup table. A pixel's
+ * luminance picks the graded colour; a little of the original colour is
+ * mixed back in so the photo keeps its own hues.
+ */
 export function applyLut(imageData, lut) {
   const data = imageData.data;
-  const keep = 0.08;
   for (let i = 0; i < data.length; i += 4) {
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
-    const lum = Math.max(0, Math.min(255, Math.round(0.2126 * r + 0.7152 * g + 0.0722 * b)));
-    data[i] = Math.round(lut.r[lum] * (1 - keep) + r * keep);
-    data[i + 1] = Math.round(lut.g[lum] * (1 - keep) + g * keep);
-    data[i + 2] = Math.round(lut.b[lum] * (1 - keep) + b * keep);
+    const lum = Math.round(0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2]);
+    data[i] = Math.round(lut.r[lum] * (1 - KEEP) + data[i] * KEEP);
+    data[i + 1] = Math.round(lut.g[lum] * (1 - KEEP) + data[i + 1] * KEEP);
+    data[i + 2] = Math.round(lut.b[lum] * (1 - KEEP) + data[i + 2] * KEEP);
   }
   return imageData;
 }

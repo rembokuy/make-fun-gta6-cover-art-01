@@ -1,12 +1,15 @@
-// Neon Coast Cover Studio — tiny static file server (Node 22+ stdlib only).
-// Usage: `node serve.ts` serves app/ at http://localhost:8080.
-// Pass `--port N` to listen on another port.
+// A tiny static file server for local development: `node serve.ts` serves
+// app/ at http://localhost:8080, or another port with `--port N`.
+// Node 22+ standard library only; nothing here talks to the network.
 
 import { createReadStream, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+const rootDir = resolve(join(fileURLToPath(new URL('.', import.meta.url)), 'app'));
+
+// Extension -> Content-Type. Anything not listed is served as a binary blob.
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -32,54 +35,70 @@ const MIME = {
   '.txt': 'text/plain; charset=utf-8',
 };
 
-const appDir = resolve(join(fileURLToPath(new URL('.', import.meta.url)), 'app'));
+const DEFAULT_TYPE = 'application/octet-stream';
 
-let port = 8080;
-const portFlag = process.argv.indexOf('--port');
-if (portFlag >= 0) {
-  const parsed = Number.parseInt(process.argv[portFlag + 1] ?? '', 10);
-  if (Number.isInteger(parsed) && parsed > 0 && parsed < 65536) port = parsed;
+// `--port N` (or `--port=N`) picks the listen port; default 8080.
+function pickPort(argv) {
+  const fallback = 8080;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--port' && i + 1 < argv.length) {
+      const n = Number.parseInt(argv[i + 1], 10);
+      if (Number.isInteger(n) && n > 0 && n < 65536) return n;
+    } else if (arg.startsWith('--port=')) {
+      const n = Number.parseInt(arg.slice('--port='.length), 10);
+      if (Number.isInteger(n) && n > 0 && n < 65536) return n;
+    }
+  }
+  return fallback;
 }
 
+const port = pickPort(process.argv.slice(2));
+
 const server = createServer((req, res) => {
-  let rawPath = (req.url ?? '/').split(/[?#]/)[0] ?? '/';
-  let decoded;
+  let pathname;
   try {
-    decoded = decodeURIComponent(rawPath);
+    // A request line the URL parser cannot read is a bad request, not a file.
+    pathname = decodeURIComponent(new URL(req.url ?? '/', 'http://localhost').pathname);
   } catch {
     res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
-    res.end('400 Bad Request\n');
+    res.end('400 bad request\n');
     return;
   }
-  if (decoded.endsWith('/')) decoded += 'index.html';
-  const resolved = resolve(join(appDir, decoded));
-  if (resolved !== appDir && !resolved.startsWith(appDir + sep)) {
+
+  // A trailing slash names the directory's index page.
+  if (pathname.endsWith('/')) pathname += 'index.html';
+
+  // Resolve inside app/ and refuse anything that climbs out of it.
+  const file = resolve(rootDir, `.${sep}${pathname.replace(/^\//, '')}`);
+  if (file !== rootDir && !file.startsWith(rootDir + sep)) {
     res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
-    res.end('403 Forbidden\n');
+    res.end('403 forbidden\n');
     return;
   }
+
   let stat;
   try {
-    stat = statSync(resolved);
+    stat = statSync(file);
   } catch {
+    stat = null;
+  }
+  if (!stat || !stat.isFile()) {
     res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
-    res.end('404 Not Found\n');
+    res.end('404 not found\n');
     return;
   }
-  if (!stat.isFile()) {
-    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
-    res.end('404 Not Found\n');
-    return;
-  }
-  const type = MIME[extname(resolved).toLowerCase()] ?? 'application/octet-stream';
+
+  const type = MIME[extname(file).toLowerCase()] ?? DEFAULT_TYPE;
   res.writeHead(200, {
     'content-type': type,
     'content-length': stat.size,
     'cache-control': 'no-store',
   });
-  createReadStream(resolved).pipe(res);
+  createReadStream(file).pipe(res);
 });
 
+// Loopback only: this server is a local preview, never a public host.
 server.listen(port, '127.0.0.1', () => {
   console.log(`Neon Coast Cover Studio at http://localhost:${port}`);
 });
