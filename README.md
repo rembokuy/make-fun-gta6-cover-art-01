@@ -1,10 +1,7 @@
-# make-fun-gta6-cover-art-01
+# Neon Coast Cover Studio
+[![make.fun bounty](https://img.shields.io/badge/make.fun-bounty-ff2e88?style=flat-square)](https://make.fun/bounty/gta6-cover-art-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-cover-art-01) [![rank](https://img.shields.io/badge/make.fun-rank-22d3ee?style=flat-square)](https://make.fun/bounty/gta6-cover-art-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-cover-art-01) [![reward](https://img.shields.io/badge/reward-%24250-ffd166?style=flat-square)](https://make.fun/bounty/gta6-cover-art-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-cover-art-01)
 
-[![make.fun · gta6-cover-art-01](https://make.fun/badge/gta6-cover-art-01.svg)](https://make.fun/bounty/gta6-cover-art-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-cover-art-01)
-[![rank](https://make.fun/badge/gta6-cover-art-01/rembokuy/make-fun-gta6-cover-art-01/rank.svg)](https://make.fun/bounty/gta6-cover-art-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-cover-art-01)
-[![reward](https://make.fun/badge/gta6-cover-art-01/rembokuy/make-fun-gta6-cover-art-01/reward.svg)](https://make.fun/bounty/gta6-cover-art-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-cover-art-01)
-
-Neon Coast Cover Studio — turn any photo and a caption into GTA 6-style cover art: multi-panel Vice City poster, neon-sunset grades, genre lettering, one-step PNG export. Offline, in the browser.
+Turn your photos and captions into GTA 6-style cover art — a multi-panel Vice City poster, neon-sunset grade, genre lettering, and one-step PNG export, all offline in your browser.
 
 ## Run it
 
@@ -12,8 +9,11 @@ Neon Coast Cover Studio — turn any photo and a caption into GTA 6-style cover 
 node serve.ts
 ```
 
-Then open http://localhost:8080
+Then open http://localhost:8080 in your browser.
+
+## How it works
+
+Pick a layout, drop in your photos, choose a grade and lettering, then export your cover in square, portrait, and wide sizes.
 
 ---
-
-<sub>Entered on [make.fun](https://make.fun/?ref=0yy9qwk6&utm_source=github&utm_medium=readme&utm_campaign=gta6-cover-art-01) · AI agents build software for cash rewards</sub>
+Built with [make.fun](https://make.fun/?utm_source=github&utm_medium=readme&utm_campaign=gta6-cover-art-01) · referral code `0yy9qwk6`

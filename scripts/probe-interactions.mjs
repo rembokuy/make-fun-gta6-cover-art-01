@@ -1,208 +1,149 @@
-// Neon Coast interaction probe: loads the plain editor (no ?shot=), switches
-// a layout and a grade, checks undo becomes available, clicks "Export all 3
-// sizes" and checks that three PNGs are downloaded. Reports JS errors and any
-// network request to a host other than localhost.
-//
-// Run while `node serve.ts` is up:
-//   node scripts/probe-interactions.mjs
+// Probe the editor's interactions end to end:
+// load the plain editor, switch layout and grade, check undo, then export
+// all three PNG sizes and wait for the downloads.
+// Usage: run while `node serve.ts` serves http://localhost:8080.
+// Exits 1 when any check fails.
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { waitForHttp, createTarget, closeTarget, connectWs, Session, sleep } from './cdp.mjs';
 
-const here = dirname(fileURLToPath(import.meta.url));
-const root = resolve(here, '..');
-const tmpDir = join(root, 'shots-tmp');
-const downloadDir = join(tmpDir, 'downloads');
-const profileDir = join(tmpDir, 'profile-probe');
-mkdirSync(downloadDir, { recursive: true });
+const repoDir = resolve(join(fileURLToPath(import.meta.url), '..', '..'));
+const profileDir = join(repoDir, 'shots-tmp', 'profile-probe');
+const downloadDir = join(repoDir, 'shots-tmp', 'downloads');
+const chromePath = join(homedir(), '.cache/ms-playwright/chromium-1255/chrome-linux64/chrome');
+const PORT = 9223;
+const BASE = 'http://localhost:8080';
+
 mkdirSync(profileDir, { recursive: true });
+mkdirSync(downloadDir, { recursive: true });
+for (const file of readdirSync(downloadDir)) rmSync(join(downloadDir, file), { force: true });
 
-const CHROME = join(homedir(), '.cache/ms-playwright/chromium-1255/chrome-linux64/chrome');
-const DEBUG_PORT = 9223;
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const checks = {};
+const exceptions = [];
+const consoleErrors = [];
+const externalRequests = [];
+let failed = false;
 
-async function waitForDebugger() {
-  for (let i = 0; i < 60; i += 1) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${DEBUG_PORT}/json/version`);
-      if (res.ok) return await res.json();
-    } catch {
-      // Not up yet.
-    }
-    await sleep(500);
-  }
-  throw new Error('Chromium DevTools did not come up');
+function check(name, ok, detail = '') {
+  checks[name] = ok ? 'pass' : `FAIL${detail ? `: ${detail}` : ''}`;
+  if (!ok) failed = true;
 }
 
-/** A small DevTools client over one WebSocket: send, await, collect events. */
-class Cdp {
-  constructor(ws) {
-    this.ws = ws;
-    this.nextId = 1;
-    this.pending = new Map();
-    this.events = [];
-    ws.addEventListener('message', (event) => {
-      const msg = JSON.parse(event.data);
-      if (msg.id && this.pending.has(msg.id)) {
-        const { resolve, reject } = this.pending.get(msg.id);
-        this.pending.delete(msg.id);
-        if (msg.error) reject(new Error(msg.error.message));
-        else resolve(msg.result ?? {});
-      } else if (msg.method) {
-        this.events.push(msg);
-      }
-    });
-  }
-
-  call(method, params = {}, sessionId) {
-    const id = this.nextId;
-    this.nextId += 1;
-    const payload = { id, method, params };
-    if (sessionId) payload.sessionId = sessionId;
-    this.ws.send(JSON.stringify(payload));
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      setTimeout(() => {
-        if (this.pending.has(id)) {
-          this.pending.delete(id);
-          reject(new Error(`CDP timeout: ${method}`));
-        }
-      }, 30000);
-    });
-  }
-}
-
-async function evalJs(cdp, sessionId, expression) {
-  const result = await cdp.call('Runtime.evaluate', { expression, returnByValue: true }, sessionId);
-  if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
-  return result.result?.value;
-}
-
-async function waitUntil(cdp, sessionId, expression, label, timeoutMs = 30000) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    let ok = false;
-    try {
-      ok = await evalJs(cdp, sessionId, expression);
-    } catch {
-      ok = false;
-    }
-    if (ok) return;
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
-    await sleep(250);
-  }
-}
+const chrome = spawn(chromePath, [
+  '--headless=new',
+  '--no-sandbox',
+  '--disable-gpu',
+  '--hide-scrollbars',
+  `--remote-debugging-port=${PORT}`,
+  `--user-data-dir=${profileDir}`,
+  'about:blank',
+], { stdio: 'ignore' });
 
 async function main() {
-  if (!existsSync(CHROME)) throw new Error(`Chromium not found at ${CHROME}`);
-  const chrome = spawn(CHROME, [
-    '--headless=new',
-    '--no-sandbox',
-    '--disable-gpu',
-    '--hide-scrollbars',
-    `--remote-debugging-port=${DEBUG_PORT}`,
-    `--user-data-dir=${profileDir}`,
-    'about:blank',
-  ], { stdio: 'ignore' });
-
-  const checks = {};
+  const version = await waitForHttp(PORT, '/json/version', 20000);
+  const browserWs = await connectWs(version.webSocketDebuggerUrl);
+  const browser = new Session(browserWs);
   try {
-    const version = await waitForDebugger();
-    const ws = new WebSocket(version.webSocketDebuggerUrl);
-    await new Promise((resolve, reject) => {
-      ws.addEventListener('open', resolve);
-      ws.addEventListener('error', reject);
-    });
-    const cdp = new Cdp(ws);
-    const { targetId } = await cdp.call('Target.createTarget', { url: 'about:blank' });
-    const { sessionId } = await cdp.call('Target.attachToTarget', { targetId, flatten: true });
-    await cdp.call('Page.enable', {}, sessionId);
-    await cdp.call('Runtime.enable', {}, sessionId);
-    await cdp.call('Network.enable', {}, sessionId);
+    await browser.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloadDir });
+  } catch {
     try {
-      await cdp.call('Browser.setDownloadBehavior', {
-        behavior: 'allow',
-        downloadPath: downloadDir,
-        eventsEnabled: true,
-      }, sessionId);
-    } catch {
-      await cdp.call('Page.setDownloadBehavior', {
-        behavior: 'allow',
-        downloadPath: downloadDir,
-      }, sessionId);
-    }
-
-    await cdp.call('Emulation.setDeviceMetricsOverride', {
-      width: 1280, height: 800, deviceScaleFactor: 1, mobile: false,
-    }, sessionId);
-    const before = new Set(readdirSync(downloadDir));
-    await cdp.call('Page.navigate', { url: 'http://localhost:8080/' }, sessionId);
-    await waitUntil(cdp, sessionId, `document.querySelectorAll('#filmstrip .thumb').length === 2`, 'samples loaded');
-    checks.samplesLoaded = true;
-
-    // Switch layout to Nine-Panel Grid and grade to Turbo Teal.
-    checks.layoutSwitched = await evalJs(cdp, sessionId, `(() => {
-      const b = [...document.querySelectorAll('#layouts .pick')].find((x) => x.textContent === 'Nine-Panel Grid');
-      if (!b) return false;
-      b.click();
-      return b.classList.contains('active');
-    })()`);
-    checks.gradeSwitched = await evalJs(cdp, sessionId, `(() => {
-      const b = [...document.querySelectorAll('#grades .swatch')].find((x) => x.title === 'Turbo Teal');
-      if (!b) return false;
-      b.click();
-      return b.classList.contains('active');
-    })()`);
-    checks.undoEnabled = await evalJs(cdp, sessionId, `!document.getElementById('undo').disabled`);
-
-    // Export all three sizes and wait for the downloads.
-    await evalJs(cdp, sessionId, `document.getElementById('export-all').click()`);
-    const deadline = Date.now() + 30000;
-    let found = [];
-    while (Date.now() < deadline) {
-      found = readdirSync(downloadDir).filter((f) => f.endsWith('.png') && !before.has(f));
-      if (found.length >= 3) break;
-      await sleep(300);
-    }
-    checks.exportedFiles = found.sort();
-    checks.statusText = await evalJs(cdp, sessionId, `document.getElementById('status').textContent`);
-
-    const exceptions = [];
-    const errors = [];
-    const external = [];
-    for (const event of cdp.events) {
-      if (event.method === 'Runtime.exceptionThrown') {
-        exceptions.push(event.params.exceptionDetails?.text ?? 'exception');
-      }
-      if (event.method === 'Runtime.consoleAPICalled' && event.params.type === 'error') {
-        errors.push(event.params.args.map((a) => a.value ?? a.description ?? '').join(' '));
-      }
-      if (event.method === 'Network.requestWillBeSent') {
-        const url = event.params.request?.url ?? '';
-        if (/^https?:\/\//.test(url) && !/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?\//.test(url)) {
-          external.push(url);
-        }
-      }
-    }
-    checks.exceptions = exceptions;
-    checks.consoleErrors = errors;
-    checks.externalRequests = external;
-    ws.close();
-  } finally {
-    chrome.kill('SIGKILL');
+      await browser.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: downloadDir });
+    } catch { /* downloads may still work with the default path */ }
   }
-  console.log(JSON.stringify(checks, null, 2));
-  const ok = checks.samplesLoaded && checks.layoutSwitched && checks.gradeSwitched
-    && checks.undoEnabled && checks.exportedFiles.length === 3
-    && checks.exceptions.length === 0 && checks.consoleErrors.length === 0
-    && checks.externalRequests.length === 0;
-  if (!ok) process.exitCode = 1;
+
+  const target = await createTarget(PORT, 'about:blank');
+  const ws = await connectWs(target.webSocketDebuggerUrl);
+  const session = new Session(ws);
+
+  session.on('Runtime.exceptionThrown', (params) => {
+    exceptions.push(String(params.exceptionDetails?.exception?.description ?? params.exceptionDetails?.text ?? 'unknown').slice(0, 500));
+  });
+  session.on('Runtime.consoleAPICalled', (params) => {
+    if (params.type === 'error') {
+      consoleErrors.push(params.args.map((a) => a.value ?? a.description ?? '').join(' ').slice(0, 500));
+    }
+  });
+  session.on('Network.requestWillBeSent', (params) => {
+    try {
+      const host = new URL(params.request.url).hostname;
+      if (host !== 'localhost' && host !== '127.0.0.1') externalRequests.push(params.request.url);
+    } catch { /* ignore */ }
+  });
+
+  try {
+    await session.send('Page.enable');
+    await session.send('Runtime.enable');
+    await session.send('Network.enable');
+    await session.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+    await session.send('Page.navigate', { url: `${BASE}/` });
+
+    const thumbs = await session.waitFor(`document.querySelectorAll('#filmstrip img').length >= 2`, 30000);
+    check('two-sample-thumbnails', thumbs);
+
+    const layoutClicked = await session.evaluate(`(() => {
+      const btn = [...document.querySelectorAll('#layouts button')].find((b) => b.textContent.trim() === 'Nine-Panel Grid');
+      if (!btn) return false;
+      btn.click();
+      return true;
+    })()`);
+    check('click-layout-nine-panel-grid', layoutClicked === true);
+    const layoutActive = await session.evaluate(`(() => {
+      const btn = [...document.querySelectorAll('#layouts button')].find((b) => b.textContent.trim() === 'Nine-Panel Grid');
+      return btn ? btn.classList.contains('active') : false;
+    })()`);
+    check('layout-nine-panel-grid-active', layoutActive === true);
+
+    const gradeClicked = await session.evaluate(`(() => {
+      const btn = [...document.querySelectorAll('#grades button')].find((b) => b.textContent.trim() === 'Turbo Teal');
+      if (!btn) return false;
+      btn.click();
+      return true;
+    })()`);
+    check('click-grade-turbo-teal', gradeClicked === true);
+    const gradeActive = await session.evaluate(`(() => {
+      const btn = [...document.querySelectorAll('#grades button')].find((b) => b.textContent.trim() === 'Turbo Teal');
+      return btn ? btn.classList.contains('active') : false;
+    })()`);
+    check('grade-turbo-teal-active', gradeActive === true);
+
+    const undoEnabled = await session.evaluate(`!document.getElementById('undo').disabled`);
+    check('undo-enabled-after-changes', undoEnabled === true);
+
+    await session.evaluate(`document.getElementById('export-all').click()`);
+    let downloaded = [];
+    const start = Date.now();
+    while (Date.now() - start < 30000) {
+      downloaded = readdirSync(downloadDir).filter((f) => f.endsWith('.png'));
+      if (downloaded.length >= 3) break;
+      await sleep(500);
+    }
+    check('three-png-downloads', downloaded.length >= 3, `got ${downloaded.length}: ${downloaded.join(', ')}`);
+
+    const statusText = await session.evaluate(`document.getElementById('status').textContent`);
+    checks.status_text = statusText;
+  } catch (err) {
+    failed = true;
+    checks.fatal = err.message;
+  } finally {
+    ws.socket.destroy();
+    browserWs.socket.destroy();
+    await closeTarget(PORT, target.id);
+  }
 }
 
-main().catch((error) => {
-  console.error(error.message);
-  process.exit(1);
-});
+try {
+  await main();
+} catch (err) {
+  failed = true;
+  checks.fatal = err.message;
+} finally {
+  chrome.kill('SIGKILL');
+}
+
+if (exceptions.length > 0 || consoleErrors.length > 0 || externalRequests.length > 0) failed = true;
+console.log(JSON.stringify({ checks, exceptions, consoleErrors, externalRequests }, null, 2));
+process.exit(failed ? 1 : 0);

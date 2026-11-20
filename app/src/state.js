@@ -1,24 +1,18 @@
-// Neon Coast design state: the serialisable part of a cover (everything but
-// the loaded image pixels) plus undo/redo over it. Photos live outside the
-// state — each panel only stores an index into the photo list — so a snapshot
-// stays small and an undo never has to re-decode an image.
+// Design state for Neon Coast Cover Studio.
+// A design is plain JSON: { layout, grade, title, subtitle, badge,
+// grain, vignette, halftone, panels }, each panel { photo, zoom, ox, oy }
+// where photo is a photo index or -1 for empty, zoom is a scale factor,
+// and ox/oy pan the photo as a fraction of the panel size.
 
-import { slotCount } from './layouts.js';
-
-/** The blank slot every panel starts from: no photo, no zoom, no pan. */
-function emptyPanel() {
-  return { photo: -1, zoom: 1, ox: 0, oy: 0 };
-}
-
-/** A fresh design: four-panel grid, Vice Sunset grade, photos dealt in. */
 export function freshDesign(photoCount) {
   const panels = [];
-  for (let i = 0; i < 9; i += 1) {
-    // Photos cycle across the slots so every layout starts full; a slot can
-    // still be cleared back to empty from the editor.
-    const slot = emptyPanel();
-    if (photoCount > 0) slot.photo = i % photoCount;
-    panels.push(slot);
+  for (let i = 0; i < 9; i++) {
+    panels.push({
+      photo: photoCount > 0 ? i % photoCount : -1,
+      zoom: 1,
+      ox: 0,
+      oy: 0,
+    });
   }
   return {
     layout: 'four',
@@ -33,23 +27,22 @@ export function freshDesign(photoCount) {
   };
 }
 
-/** A plain deep copy of a design, safe to keep on the undo stack. */
+// A deep copy through JSON, so a snapshot never shares objects with the live design.
 export function snapshot(design) {
   return JSON.parse(JSON.stringify(design));
 }
 
-/** Grows the panel list so every slot of the current layout has an entry. */
-export function normalisePanels(design) {
-  const wanted = slotCount(design.layout);
-  while (design.panels.length < wanted) design.panels.push(emptyPanel());
+// Grow the panel list with empty panels until it holds as many panels as
+// the active layout needs.
+export function normalisePanels(design, slotCount) {
+  while (design.panels.length < slotCount) {
+    design.panels.push({ photo: -1, zoom: 1, ox: 0, oy: 0 });
+  }
   return design;
 }
 
-/**
- * Undo/redo history over designs. `push` records the design before a change;
- * `undo`/`redo` hand back the design to restore, or null when there is
- * nothing to step to. The stack is capped so a long session stays light.
- */
+// Undo/redo history. push() stores a snapshot taken BEFORE a change and
+// clears the redo stack; undo/redo hand back a design, or null at the end.
 export function createHistory(limit = 60) {
   const past = [];
   const future = [];

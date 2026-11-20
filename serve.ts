@@ -1,23 +1,11 @@
-// A tiny static server for app/ (Node 22+, standard library only), so the
-// entry can be tried locally without a build step:
-//
-//   node serve.ts            serves app/ on http://localhost:8080
-//   node serve.ts --port 9000
-//
-// It sends the MIME types an offline web app needs, refuses any path outside
-// app/, and otherwise does nothing clever: a development convenience, not a
-// web server for the internet.
+// Neon Coast Cover Studio — tiny static file server (Node 22+ stdlib only).
+// Usage: `node serve.ts` serves app/ at http://localhost:8080.
+// Pass `--port N` to listen on another port.
 
 import { createReadStream, statSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { extname, join, normalize, resolve, sep } from 'node:path';
+import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-
-const root = resolve(fileURLToPath(new URL('./app', import.meta.url)));
-const args = process.argv.slice(2);
-const portFlag = args.indexOf('--port');
-const wanted = portFlag === -1 ? 8080 : Number(args[portFlag + 1]);
-const port = Number.isInteger(wanted) && wanted > 0 && wanted < 65536 ? wanted : 8080;
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -44,36 +32,54 @@ const MIME = {
   '.txt': 'text/plain; charset=utf-8',
 };
 
-createServer((request, response) => {
-  const url = new URL(request.url ?? '/', 'http://localhost');
-  let pathname;
+const appDir = resolve(join(fileURLToPath(new URL('.', import.meta.url)), 'app'));
+
+let port = 8080;
+const portFlag = process.argv.indexOf('--port');
+if (portFlag >= 0) {
+  const parsed = Number.parseInt(process.argv[portFlag + 1] ?? '', 10);
+  if (Number.isInteger(parsed) && parsed > 0 && parsed < 65536) port = parsed;
+}
+
+const server = createServer((req, res) => {
+  let rawPath = (req.url ?? '/').split(/[?#]/)[0] ?? '/';
+  let decoded;
   try {
-    pathname = decodeURIComponent(url.pathname);
+    decoded = decodeURIComponent(rawPath);
   } catch {
-    response.writeHead(400).end('bad request');
+    res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end('400 Bad Request\n');
     return;
   }
-  if (pathname.endsWith('/')) pathname += 'index.html';
-  const file = resolve(join(root, normalize(pathname)));
-  if (file !== root && !file.startsWith(root + sep)) {
-    response.writeHead(403).end('forbidden');
+  if (decoded.endsWith('/')) decoded += 'index.html';
+  const resolved = resolve(join(appDir, decoded));
+  if (resolved !== appDir && !resolved.startsWith(appDir + sep)) {
+    res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end('403 Forbidden\n');
     return;
   }
-  let size;
+  let stat;
   try {
-    const stats = statSync(file);
-    if (!stats.isFile()) throw new Error('not a file');
-    size = stats.size;
+    stat = statSync(resolved);
   } catch {
-    response.writeHead(404).end('not found');
+    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end('404 Not Found\n');
     return;
   }
-  response.writeHead(200, {
-    'content-type': MIME[extname(file).toLowerCase()] ?? 'application/octet-stream',
-    'content-length': size,
+  if (!stat.isFile()) {
+    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end('404 Not Found\n');
+    return;
+  }
+  const type = MIME[extname(resolved).toLowerCase()] ?? 'application/octet-stream';
+  res.writeHead(200, {
+    'content-type': type,
+    'content-length': stat.size,
     'cache-control': 'no-store',
   });
-  createReadStream(file).pipe(response);
-}).listen(port, '127.0.0.1', () => {
-  console.log(`app/ is on http://localhost:${port}`);
+  createReadStream(resolved).pipe(res);
+});
+
+server.listen(port, '127.0.0.1', () => {
+  console.log(`Neon Coast Cover Studio at http://localhost:${port}`);
 });
