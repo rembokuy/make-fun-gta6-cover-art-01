@@ -1,9 +1,6 @@
-// Tiny static server for local development: `node serve.ts [--port N]`.
-// Serves the app/ folder on http://localhost:8080 (loopback only).
-
-import { createReadStream, statSync } from "node:fs";
+import { createReadStream, existsSync, statSync } from "node:fs";
 import { createServer } from "node:http";
-import { extname, join, resolve, sep } from "node:path";
+import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(fileURLToPath(new URL("./app", import.meta.url)));
@@ -33,52 +30,46 @@ const MIME = {
   ".txt": "text/plain; charset=utf-8",
 };
 
-function portFromArgs() {
-  const idx = process.argv.indexOf("--port");
-  if (idx >= 0 && process.argv[idx + 1]) {
-    const n = Number(process.argv[idx + 1]);
-    if (Number.isInteger(n) && n > 0 && n < 65536) return n;
+let port = 8080;
+const portArg = process.argv.indexOf("--port");
+if (portArg >= 0) {
+  const value = Number(process.argv[portArg + 1]);
+  if (!Number.isInteger(value) || value < 1 || value > 65535) {
+    console.error("Usage: node serve.ts [--port N]  (N must be 1..65535)");
+    process.exit(1);
   }
-  return 8080;
+  port = value;
 }
 
 const server = createServer((req, res) => {
-  let pathname;
   try {
-    pathname = decodeURIComponent(new URL(req.url || "/", "http://x").pathname);
-  } catch {
-    res.writeHead(400, { "content-type": "text/plain" });
-    res.end("bad request");
-    return;
+    const url = new URL(req.url || "/", "http://127.0.0.1");
+    let pathname = decodeURIComponent(url.pathname);
+    if (pathname.endsWith("/")) pathname += "index.html";
+    const filePath = resolve(join(root, normalize(pathname)));
+    if (filePath !== root && !filePath.startsWith(root + sep)) {
+      res.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
+      res.end("Forbidden\n");
+      return;
+    }
+    if (!existsSync(filePath) || !statSync(filePath).isFile()) {
+      res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+      res.end("Not found\n");
+      return;
+    }
+    const size = statSync(filePath).size;
+    res.writeHead(200, {
+      "content-type": MIME[extname(filePath).toLowerCase()] || "application/octet-stream",
+      "content-length": size,
+      "cache-control": "no-store",
+    });
+    createReadStream(filePath).pipe(res);
+  } catch (err) {
+    res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
+    res.end("Internal error\n");
   }
-  if (pathname.endsWith("/")) pathname += "index.html";
-
-  const file = resolve(join(root, pathname));
-  if (file !== root && !file.startsWith(root + sep)) {
-    res.writeHead(403, { "content-type": "text/plain" });
-    res.end("forbidden");
-    return;
-  }
-
-  let stat;
-  try {
-    stat = statSync(file);
-    if (!stat.isFile()) throw new Error("not a file");
-  } catch {
-    res.writeHead(404, { "content-type": "text/plain" });
-    res.end("not found");
-    return;
-  }
-
-  res.writeHead(200, {
-    "content-type": MIME[extname(file).toLowerCase()] || "application/octet-stream",
-    "content-length": stat.size,
-    "cache-control": "no-store",
-  });
-  createReadStream(file).pipe(res);
 });
 
-const port = portFromArgs();
 server.listen(port, "127.0.0.1", () => {
-  console.log(`Neon Coast Cover Studio at http://localhost:${port}`);
+  console.log(`Neon Coast Cover Studio serving app/ at http://127.0.0.1:${port}`);
 });

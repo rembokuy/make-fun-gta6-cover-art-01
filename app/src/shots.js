@@ -1,12 +1,12 @@
-// Screenshot scenes: read the design from the URL query string so the
-// shot script can open a deterministic editor or cover state.
-
 export function sceneFromQuery(query) {
   const params = new URLSearchParams(query);
-  const photos = (params.get("photos") || "pier").split(",").filter(Boolean);
+  const photosParam = params.get("photos");
+  const photos = photosParam
+    ? photosParam.split(",").map((name) => name.trim()).filter(Boolean)
+    : ["pier"];
   return {
-    photos,
     shot: params.get("shot") || "editor",
+    photos,
     layout: params.get("layout") || "four",
     grade: params.get("grade") || "vice",
     title: params.get("title") || "SUNSET HEIST",
@@ -17,16 +17,16 @@ export function sceneFromQuery(query) {
   };
 }
 
-// "1080x1350" -> {w: 1080, h: 1350}; anything else -> null.
 export function parseExportSize(value) {
-  if (!value) return null;
+  if (typeof value !== "string") return null;
   const match = /^(\d+)x(\d+)$/.exec(value.trim());
   if (!match) return null;
-  return { w: Number(match[1]), h: Number(match[2]) };
+  const w = Number(match[1]);
+  const h = Number(match[2]);
+  if (!Number.isInteger(w) || !Number.isInteger(h) || w <= 0 || h <= 0) return null;
+  return { w, h };
 }
 
-// Tell the shot script the page has rendered: two animation frames after
-// the caller asks, so paint has actually happened.
 export function markReady() {
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {

@@ -1,7 +1,3 @@
-// The cover design: a plain serialisable object plus an undo history.
-// A panel points at a photo by index (-1 = empty) and stores its own zoom
-// and pan offsets, so every panel can be framed independently.
-
 import { slotCount } from "./layouts.js";
 
 export const MAX_PANELS = 9;
@@ -18,6 +14,7 @@ export function freshDesign(photoCount) {
     panels.push(panel);
   }
   return {
+    panels,
     layout: "four",
     grade: "vice",
     title: "SUNSET HEIST",
@@ -26,7 +23,6 @@ export function freshDesign(photoCount) {
     grain: true,
     vignette: true,
     halftone: true,
-    panels,
   };
 }
 
@@ -34,22 +30,21 @@ export function snapshot(design) {
   return JSON.parse(JSON.stringify(design));
 }
 
-// Grow the panels array with empty panels until it matches the slot count
-// of the design's active layout.
 export function normalisePanels(design) {
-  const need = slotCount(design.layout);
-  while (design.panels.length < need) design.panels.push(emptyPanel());
+  const want = slotCount(design.layout);
+  while (design.panels.length < want) design.panels.push(emptyPanel());
+  if (design.panels.length > want) design.panels.length = want;
   return design;
 }
 
 export function createHistory(limit = 60) {
-  let past = [];
-  let future = [];
+  const past = [];
+  const future = [];
   return {
     push(design) {
       past.push(snapshot(design));
-      if (past.length > limit) past = past.slice(past.length - limit);
-      future = [];
+      if (past.length > limit) past.shift();
+      future.length = 0;
     },
     undo(current) {
       if (past.length === 0) return null;

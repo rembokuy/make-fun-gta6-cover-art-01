@@ -1,42 +1,41 @@
-// Take the four dossier screenshots: open each shot from shots.json in the
-// vendored Chromium, wait for window.__shotReady, capture a JPEG no larger
-// than 262144 bytes. Exits 1 on any exception, console error, or network
-// request to a host other than localhost.
-
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { launchChromium } from "./cdp.mjs";
 
-const repoDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const MAX_BYTES = 262144;
-
-const shots = JSON.parse(readFileSync(join(repoDir, "shots.json"), "utf-8"));
+const repoDir = dirname(dirname(fileURLToPath(import.meta.url)));
+const shots = JSON.parse(readFileSync(join(repoDir, "shots.json"), "utf8"));
 
 const cdp = await launchChromium({
   port: 9222,
-  userDataDir: join(repoDir, "shots-tmp", "profile"),
+  userDataDir: join(repoDir, "shots-tmp/profile"),
   width: 1280,
   height: 720,
 });
 
 const results = [];
+let failed = false;
 try {
   for (const shot of shots) {
     await cdp.setViewport(shot.w, shot.h);
-    await cdp.navigate(
-      `http://localhost:8080/?${shot.query}`
-    );
-    await cdp.waitFor("window.__shotReady === true", 30000);
-    let quality = 88;
-    let buf = await cdp.screenshot(quality);
-    while (buf.length > MAX_BYTES && quality > 55) {
-      quality -= 8;
-      buf = await cdp.screenshot(quality);
+    await cdp.navigate(`http://localhost:8080/?${shot.query}`);
+    const ready = await cdp.waitFor("window.__shotReady === true", 30000);
+    let buffer = null;
+    let quality = null;
+    if (ready) {
+      for (let q = 88; q >= 55; q -= 8) {
+        const shot_buf = await cdp.screenshot(q);
+        buffer = shot_buf;
+        quality = q;
+        if (shot_buf.length <= MAX_BYTES) break;
+      }
     }
-    writeFileSync(join(repoDir, "screenshots", shot.name), buf);
-    results.push({ name: shot.name, bytes: buf.length, quality, w: shot.w, h: shot.h });
-    console.log(`${shot.name}: ${buf.length} bytes @ q${quality}`);
+    const size = buffer ? buffer.length : 0;
+    const ok = ready && buffer !== null && size <= MAX_BYTES;
+    if (!ok) failed = true;
+    if (buffer) writeFileSync(join(repoDir, "screenshots", shot.name), buffer);
+    results.push({ name: shot.name, w: shot.w, h: shot.h, quality, bytes: size, ready, ok });
   }
 } finally {
   cdp.close();
@@ -47,12 +46,7 @@ const report = {
   exceptions: cdp.exceptions,
   consoleErrors: cdp.consoleErrors,
   externalRequests: cdp.externalRequests,
+  ok: !failed && cdp.exceptions.length === 0 && cdp.consoleErrors.length === 0 && cdp.externalRequests.length === 0,
 };
 console.log(JSON.stringify(report, null, 2));
-
-const failed =
-  results.some((r) => r.bytes > MAX_BYTES) ||
-  cdp.exceptions.length > 0 ||
-  cdp.consoleErrors.length > 0 ||
-  cdp.externalRequests.length > 0;
-process.exit(failed ? 1 : 0);
+if (!report.ok) process.exit(1);

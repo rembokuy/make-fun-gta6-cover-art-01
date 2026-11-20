@@ -1,5 +1,3 @@
-// PNG export: render the design at each size and trigger downloads.
-
 import { renderCover } from "./cover.js";
 
 export const EXPORT_SIZES = [
@@ -21,37 +19,41 @@ export function exportFileName(w, h) {
   return `neon-coast-${w}x${h}.png`;
 }
 
-function downloadBlob(blob, name) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 5000);
-}
-
-export function downloadCover(design, photos, size) {
+export function downloadCover(canvas, w, h) {
   return new Promise((resolve) => {
-    const canvas = renderCoverCanvas(design, photos, size.w, size.h);
     canvas.toBlob((blob) => {
-      if (!blob) return resolve(null);
-      downloadBlob(blob, exportFileName(size.w, size.h));
-      resolve(exportFileName(size.w, size.h));
+      if (!blob) {
+        resolve(null);
+        return;
+      }
+      const name = exportFileName(w, h);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      resolve(name);
     }, "image/png");
   });
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export async function downloadAllSizes(design, photos, onFile) {
   const saved = [];
   for (const size of EXPORT_SIZES) {
-    const name = await downloadCover(design, photos, size);
+    const canvas = renderCoverCanvas(design, photos, size.w, size.h);
+    const name = await downloadCover(canvas, size.w, size.h);
     if (name) {
       saved.push(name);
       if (onFile) onFile(name);
     }
-    await new Promise((r) => setTimeout(r, 350));
+    await sleep(350);
   }
   return saved;
 }

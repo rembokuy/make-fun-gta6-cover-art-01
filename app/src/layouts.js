@@ -1,6 +1,3 @@
-// Panel layouts for the cover. Each layout describes its slots; panelRects
-// turns a layout id plus the canvas size into concrete rectangles.
-
 export const LAYOUTS = [
   { id: "four", name: "Four-Panel Grid", slots: 4 },
   { id: "hero-three", name: "Hero + Three", slots: 4 },
@@ -10,58 +7,11 @@ export const LAYOUTS = [
 ];
 
 export function findLayout(id) {
-  return LAYOUTS.find((l) => l.id === id) || LAYOUTS[0];
+  return LAYOUTS.find((layout) => layout.id === id) || LAYOUTS[0];
 }
 
 export function slotCount(layoutId) {
   return findLayout(layoutId).slots;
-}
-
-// Returns an array of panel rects: {x, y, w, h} plus optional rot (degrees),
-// frame (white polaroid border) or backdrop (drawn edge to edge).
-export function panelRects(layoutId, W, H, titleH) {
-  const gap = Math.max(6, Math.round(Math.min(W, H) * 0.012));
-  const top = H - titleH; // photo area height; the title band sits below it
-  const layout = findLayout(layoutId);
-
-  if (layout.id === "full") {
-    return [{ x: 0, y: 0, w: W, h: H, backdrop: true }];
-  }
-
-  if (layout.id === "nine") {
-    return gridRects(3, 3, W, top, gap);
-  }
-
-  if (layout.id === "four") {
-    return gridRects(2, 2, W, top, gap);
-  }
-
-  if (layout.id === "hero-three") {
-    const heroW = Math.round(W * 0.6);
-    const sideW = W - heroW - 2 * gap;
-    const cellH = (top - 4 * gap) / 3;
-    const rects = [{ x: 0, y: 0, w: heroW, h: top }];
-    for (let i = 0; i < 3; i++) {
-      rects.push({
-        x: heroW + gap,
-        y: gap + i * (cellH + gap),
-        w: sideW,
-        h: cellH,
-      });
-    }
-    return rects;
-  }
-
-  if (layout.id === "tilted") {
-    return [
-      { x: 0, y: 0, w: W, h: H, backdrop: true },
-      { x: W * 0.05, y: H * 0.05, w: W * 0.44, h: H * 0.36, rot: -6, frame: true },
-      { x: W * 0.51, y: H * 0.09, w: W * 0.44, h: H * 0.36, rot: 5, frame: true },
-      { x: W * 0.27, y: H * 0.44, w: W * 0.46, h: H * 0.29, rot: -3, frame: true },
-    ];
-  }
-
-  return gridRects(2, 2, W, top, gap);
 }
 
 function gridRects(cols, rows, W, top, gap) {
@@ -79,4 +29,42 @@ function gridRects(cols, rows, W, top, gap) {
     }
   }
   return rects;
+}
+
+export function panelRects(layoutId, W, H, titleH) {
+  const gap = Math.max(6, Math.round(Math.min(W, H) * 0.012));
+  const top = H - titleH;
+  const layout = findLayout(layoutId);
+  if (layout.id === "full") {
+    return [{ x: 0, y: 0, w: W, h: H, backdrop: true }];
+  }
+  if (layout.id === "nine") {
+    return gridRects(3, 3, W, top, gap);
+  }
+  if (layout.id === "four") {
+    return gridRects(2, 2, W, top, gap);
+  }
+  if (layout.id === "hero-three") {
+    const heroW = Math.round(W * 0.6);
+    const sideW = W - heroW - 2 * gap;
+    const cellH = (top - 4 * gap) / 3;
+    const rects = [{ x: gap, y: gap, w: heroW - gap, h: top - 2 * gap }];
+    for (let i = 0; i < 3; i++) {
+      rects.push({
+        x: heroW + gap,
+        y: gap + i * (cellH + gap),
+        w: sideW,
+        h: cellH,
+      });
+    }
+    return rects;
+  }
+  if (layout.id === "tilted") {
+    return [
+      { x: 0.05 * W, y: 0.05 * H, w: 0.44 * W, h: 0.36 * H, rot: -6, frame: true, backdrop: true },
+      { x: 0.51 * W, y: 0.09 * H, w: 0.44 * W, h: 0.36 * H, rot: 5, frame: true, backdrop: true },
+      { x: 0.27 * W, y: 0.44 * H, w: 0.46 * W, h: 0.29 * H, rot: -3, frame: true, backdrop: true },
+    ];
+  }
+  return gridRects(2, 2, W, top, gap);
 }

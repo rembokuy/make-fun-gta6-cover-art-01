@@ -1,12 +1,9 @@
-// Editor wiring: controls, filmstrip, canvas editing, export, and the
-// deterministic ?shot scenes used for screenshots.
-
-import { LAYOUTS, findLayout, panelRects, slotCount } from "./layouts.js";
-import { GRADES, findGrade } from "./grades.js";
-import { createHistory, emptyPanel, freshDesign, normalisePanels, snapshot } from "./state.js";
 import { renderCover, titleBandHeight } from "./cover.js";
-import { EXPORT_SIZES, downloadAllSizes, downloadCover } from "./export.js";
+import { downloadAllSizes, downloadCover, EXPORT_SIZES, renderCoverCanvas } from "./export.js";
+import { findGrade, GRADES } from "./grades.js";
+import { findLayout, LAYOUTS, panelRects, slotCount } from "./layouts.js";
 import { markReady, parseExportSize, sceneFromQuery } from "./shots.js";
+import { createHistory, emptyPanel, freshDesign, normalisePanels, snapshot } from "./state.js";
 
 const PREVIEW = {
   square: { w: 900, h: 900 },
@@ -14,28 +11,37 @@ const PREVIEW = {
   wide: { w: 960, h: 540 },
 };
 
-const $ = (sel) => document.querySelector(sel);
-const stage = $("#stage");
-const ctx = stage.getContext("2d");
-const statusEl = $("#status");
-const history = createHistory(60);
+const stage = document.querySelector("#stage");
+const filmstrip = document.querySelector("#filmstrip");
+const layoutsEl = document.querySelector("#layouts");
+const gradesEl = document.querySelector("#grades");
+const aspectsEl = document.querySelector("#aspects");
+const exportOneEl = document.querySelector("#export-one");
+const statusEl = document.querySelector("#status");
+const titleInput = document.querySelector("#title");
+const subtitleInput = document.querySelector("#subtitle");
+const badgeInput = document.querySelector("#badge");
+const grainInput = document.querySelector("#grain");
+const vignetteInput = document.querySelector("#vignette");
+const halftoneInput = document.querySelector("#halftone");
+const undoBtn = document.querySelector("#undo");
+const redoBtn = document.querySelector("#redo");
+const uploadInput = document.querySelector("#upload");
+const fillAllBtn = document.querySelector("#fill-all");
+const clearPanelBtn = document.querySelector("#clear-panel");
+const exportAllBtn = document.querySelector("#export-all");
 
-const hasScene = new URLSearchParams(location.search).has("shot");
-const scene = hasScene ? sceneFromQuery(location.search) : null;
+const history = createHistory(60);
+const scene = new URLSearchParams(window.location.search).has("shot")
+  ? sceneFromQuery(window.location.search)
+  : null;
 
 let photos = [];
 let design = freshDesign(0);
 let selected = 0;
 let aspect = "square";
+let drag = null;
 let lastWheelPush = 0;
-
-function setStatus(msg) {
-  statusEl.textContent = msg;
-}
-
-function clamp(v, lo, hi) {
-  return Math.min(hi, Math.max(lo, v));
-}
 
 function loadImage(src) {
   return new Promise((resolve) => {
@@ -48,65 +54,48 @@ function loadImage(src) {
 
 async function loadFonts() {
   try {
-    await Promise.all([
-      document.fonts.load("40px Anton"),
-      document.fonts.load("40px Pacifico"),
-    ]);
-  } catch {
-    // Fall back to system fonts; the cover still renders.
+    await document.fonts.load("40px Anton");
+  } catch (err) {
+    // Fall back to system fonts.
   }
+  try {
+    await document.fonts.load("40px Pacifico");
+  } catch (err) {
+    // Fall back to system fonts.
+  }
+}
+
+function setStatus(text) {
+  statusEl.textContent = text;
 }
 
 function render() {
-  const size = PREVIEW[aspect];
+  const size = PREVIEW[aspect] || PREVIEW.square;
   stage.width = size.w;
   stage.height = size.h;
-  renderCover(ctx, size.w, size.h, design, photos, scene && scene.shot === "cover" ? -1 : selected);
-  updateUndoButtons();
-}
-
-function updateUndoButtons() {
-  $("#undo").disabled = !history.canUndo;
-  $("#redo").disabled = !history.canRedo;
+  const ctx = stage.getContext("2d");
+  const sel = scene && scene.shot === "cover" ? -1 : selected;
+  renderCover(ctx, size.w, size.h, design, photos, sel);
+  undoBtn.disabled = !history.canUndo;
+  redoBtn.disabled = !history.canRedo;
 }
 
 function syncControls() {
-  $("#title").value = design.title;
-  $("#subtitle").value = design.subtitle;
-  $("#badge").value = design.badge;
-  $("#grain").checked = design.grain;
-  $("#vignette").checked = design.vignette;
-  $("#halftone").checked = design.halftone;
-  document.querySelectorAll("#layouts button").forEach((b) => {
-    b.classList.toggle("active", b.dataset.layout === design.layout);
+  titleInput.value = design.title;
+  subtitleInput.value = design.subtitle;
+  badgeInput.value = design.badge;
+  grainInput.checked = design.grain;
+  vignetteInput.checked = design.vignette;
+  halftoneInput.checked = design.halftone;
+  layoutsEl.querySelectorAll("button").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.layout === design.layout);
   });
-  document.querySelectorAll("#grades button").forEach((b) => {
-    b.classList.toggle("active", b.dataset.grade === design.grade);
+  gradesEl.querySelectorAll("button").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.grade === design.grade);
   });
-  document.querySelectorAll("#aspects button").forEach((b) => {
-    b.classList.toggle("active", b.dataset.aspect === aspect);
+  aspectsEl.querySelectorAll("button").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.aspect === aspect);
   });
-}
-
-function buildLayoutPicker() {
-  const box = $("#layouts");
-  box.innerHTML = "";
-  for (const layout of LAYOUTS) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.textContent = layout.name;
-    b.dataset.layout = layout.id;
-    b.addEventListener("click", () => {
-      if (design.layout === layout.id) return;
-      history.push(design);
-      design.layout = layout.id;
-      normalisePanels(design);
-      selected = clamp(selected, 0, slotCount(layout.id) - 1);
-      syncControls();
-      render();
-    });
-    box.appendChild(b);
-  }
 }
 
 function gradeGradient(grade) {
@@ -114,113 +103,130 @@ function gradeGradient(grade) {
   const first = stops[0];
   const mid = stops[Math.floor(stops.length / 2)];
   const last = stops[stops.length - 1];
-  const rgb = (s) => `rgb(${s[1]},${s[2]},${s[3]})`;
+  const rgb = (s) => `rgb(${s[1]}, ${s[2]}, ${s[3]})`;
   return `linear-gradient(135deg, ${rgb(first)}, ${rgb(mid)}, ${rgb(last)})`;
 }
 
+function buildLayoutPicker() {
+  for (const layout of LAYOUTS) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.dataset.layout = layout.id;
+    btn.textContent = layout.name;
+    btn.addEventListener("click", () => {
+      history.push(design);
+      design.layout = layout.id;
+      normalisePanels(design);
+      selected = Math.min(selected, slotCount(design.layout) - 1);
+      syncControls();
+      render();
+    });
+    layoutsEl.appendChild(btn);
+  }
+}
+
 function buildGradePicker() {
-  const box = $("#grades");
-  box.innerHTML = "";
   for (const grade of GRADES) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "swatch";
-    b.title = grade.name;
-    b.dataset.grade = grade.id;
-    b.style.background = gradeGradient(grade);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.dataset.grade = grade.id;
+    btn.className = "swatch";
+    btn.style.background = gradeGradient(grade);
     const label = document.createElement("span");
     label.textContent = grade.name;
-    b.appendChild(label);
-    b.addEventListener("click", () => {
-      if (design.grade === grade.id) return;
+    btn.appendChild(label);
+    btn.addEventListener("click", () => {
       history.push(design);
       design.grade = grade.id;
       syncControls();
       render();
     });
-    box.appendChild(b);
+    gradesEl.appendChild(btn);
   }
 }
 
 function buildExportOne() {
-  const box = $("#export-one");
-  box.innerHTML = "";
   for (const size of EXPORT_SIZES) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.textContent = `${size.label} PNG`;
-    b.addEventListener("click", async () => {
-      setStatus(`Exporting ${size.label}…`);
-      const name = await downloadCover(design, photos, size);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = `${size.label} PNG`;
+    btn.addEventListener("click", async () => {
+      const canvas = renderCoverCanvas(design, photos, size.w, size.h);
+      const name = await downloadCover(canvas, size.w, size.h);
       setStatus(name ? `Exported ${name}` : "Export failed.");
     });
-    box.appendChild(b);
+    exportOneEl.appendChild(btn);
   }
 }
 
 function rebuildFilmstrip() {
-  const strip = $("#filmstrip");
-  strip.innerHTML = "";
-  photos.forEach((photo, i) => {
+  filmstrip.innerHTML = "";
+  photos.forEach((photo, index) => {
     const thumb = document.createElement("img");
     thumb.src = photo.src;
-    thumb.alt = `Photo ${i + 1}`;
+    thumb.alt = `Photo ${index + 1}`;
     thumb.width = 64;
     thumb.height = 64;
     thumb.addEventListener("click", () => {
       history.push(design);
       const panel = design.panels[selected] || emptyPanel();
-      design.panels[selected] = { ...panel, photo: i, zoom: 1, ox: 0, oy: 0 };
+      panel.photo = index;
+      panel.zoom = 1;
+      panel.ox = 0;
+      panel.oy = 0;
+      design.panels[selected] = panel;
       render();
-      setStatus(`Photo ${i + 1} placed in panel ${selected + 1}.`);
     });
-    strip.appendChild(thumb);
+    filmstrip.appendChild(thumb);
   });
+}
+
+function hitPanel(clientX, clientY) {
+  const rect = stage.getBoundingClientRect();
+  const x = (clientX - rect.left) * (stage.width / rect.width);
+  const y = (clientY - rect.top) * (stage.height / rect.height);
+  const rects = panelRects(design.layout, stage.width, stage.height, titleBandHeight(stage.height));
+  for (let i = rects.length - 1; i >= 0; i--) {
+    const r = rects[i];
+    if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) return i;
+  }
+  return -1;
 }
 
 function canvasPoint(e) {
   const rect = stage.getBoundingClientRect();
   return {
-    x: ((e.clientX - rect.left) / rect.width) * stage.width,
-    y: ((e.clientY - rect.top) / rect.height) * stage.height,
+    x: (e.clientX - rect.left) * (stage.width / rect.width),
+    y: (e.clientY - rect.top) * (stage.height / rect.height),
   };
 }
 
-function hitPanel(p) {
-  const rects = panelRects(design.layout, stage.width, stage.height, titleBandHeight(stage.height));
-  for (let i = rects.length - 1; i >= 0; i--) {
-    const r = rects[i];
-    if (p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h) return i;
-  }
-  return -1;
-}
-
-let drag = null;
-
 stage.addEventListener("pointerdown", (e) => {
-  const p = canvasPoint(e);
-  const hit = hitPanel(p);
+  const hit = hitPanel(e.clientX, e.clientY);
   if (hit < 0) return;
   selected = hit;
-  const rects = panelRects(design.layout, stage.width, stage.height, titleBandHeight(stage.height));
-  drag = { panel: hit, rect: rects[hit], lastX: p.x, lastY: p.y, moved: false };
+  const point = canvasPoint(e);
   history.push(design);
+  drag = { panel: hit, startX: point.x, startY: point.y, lastX: point.x, lastY: point.y, moved: false };
   stage.setPointerCapture(e.pointerId);
   render();
 });
 
 stage.addEventListener("pointermove", (e) => {
   if (!drag) return;
-  const p = canvasPoint(e);
-  const dx = p.x - drag.lastX;
-  const dy = p.y - drag.lastY;
-  drag.lastX = p.x;
-  drag.lastY = p.y;
-  if (Math.abs(dx) + Math.abs(dy) > 0.5) drag.moved = true;
+  const point = canvasPoint(e);
+  if (Math.abs(point.x - drag.startX) > 0.5 || Math.abs(point.y - drag.startY) > 0.5) {
+    drag.moved = true;
+  }
+  const rects = panelRects(design.layout, stage.width, stage.height, titleBandHeight(stage.height));
+  const rect = rects[drag.panel];
   const panel = design.panels[drag.panel];
-  if (!panel || panel.photo < 0) return;
-  panel.ox = clamp(panel.ox + dx / drag.rect.w, -0.6, 0.6);
-  panel.oy = clamp(panel.oy + dy / drag.rect.h, -0.6, 0.6);
+  if (rect && panel) {
+    panel.ox = Math.max(-0.6, Math.min(0.6, panel.ox + (point.x - drag.lastX) / rect.w));
+    panel.oy = Math.max(-0.6, Math.min(0.6, panel.oy + (point.y - drag.lastY) / rect.h));
+  }
+  drag.lastX = point.x;
+  drag.lastY = point.y;
   render();
 });
 
@@ -230,144 +236,162 @@ stage.addEventListener("pointerup", () => {
 
 stage.addEventListener("wheel", (e) => {
   e.preventDefault();
-  const p = canvasPoint(e);
-  const hit = hitPanel(p);
+  const hit = hitPanel(e.clientX, e.clientY);
   if (hit < 0) return;
   const panel = design.panels[hit];
-  if (!panel || panel.photo < 0) return;
+  if (!panel) return;
   const now = Date.now();
   if (now - lastWheelPush > 450) {
     history.push(design);
     lastWheelPush = now;
   }
   const factor = Math.exp(-e.deltaY * 0.0012);
-  panel.zoom = clamp(panel.zoom * factor, 1, 3.5);
+  panel.zoom = Math.max(1, Math.min(3.5, panel.zoom * factor));
   selected = hit;
   render();
 }, { passive: false });
 
-function bindControls() {
-  $("#upload").addEventListener("change", async (e) => {
-    const files = [...e.target.files];
-    for (const file of files) {
-      const url = URL.createObjectURL(file);
-      const img = await loadImage(url);
-      if (img) {
-        photos.push(img);
-        rebuildFilmstrip();
+function bindCaption(input, key) {
+  let before = snapshot(design);
+  input.addEventListener("focus", () => {
+    before = snapshot(design);
+  });
+  input.addEventListener("input", () => {
+    design[key] = input.value;
+    render();
+  });
+  input.addEventListener("change", () => {
+    history.push(before);
+    design[key] = input.value;
+    render();
+  });
+}
+
+function bindFinishToggle(input, key) {
+  input.addEventListener("change", () => {
+    history.push(design);
+    design[key] = input.checked;
+    render();
+  });
+}
+
+uploadInput.addEventListener("change", async () => {
+  const files = Array.from(uploadInput.files || []).filter((file) => file.type.startsWith("image/"));
+  let added = 0;
+  for (const file of files) {
+    const url = URL.createObjectURL(file);
+    const img = await loadImage(url);
+    if (img) {
+      photos.push(img);
+      added++;
+    }
+  }
+  uploadInput.value = "";
+  if (added > 0) {
+    rebuildFilmstrip();
+    render();
+    setStatus(`${added} photo(s) added.`);
+  } else {
+    setStatus("No valid photos found.");
+  }
+});
+
+fillAllBtn.addEventListener("click", () => {
+  const source = design.panels[selected];
+  if (!source || source.photo < 0) {
+    setStatus("Select a panel with a photo first.");
+    return;
+  }
+  history.push(design);
+  const count = slotCount(design.layout);
+  for (let i = 0; i < count; i++) {
+    design.panels[i] = { photo: source.photo, zoom: source.zoom, ox: source.ox, oy: source.oy };
+  }
+  render();
+});
+
+clearPanelBtn.addEventListener("click", () => {
+  history.push(design);
+  design.panels[selected] = emptyPanel();
+  render();
+});
+
+aspectsEl.querySelectorAll("button").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    aspect = btn.dataset.aspect;
+    syncControls();
+    render();
+  });
+});
+
+undoBtn.addEventListener("click", () => {
+  const prev = history.undo(design);
+  if (prev) {
+    design = prev;
+    selected = Math.min(selected, design.panels.length - 1);
+    syncControls();
+    render();
+  }
+});
+
+redoBtn.addEventListener("click", () => {
+  const next = history.redo(design);
+  if (next) {
+    design = next;
+    selected = Math.min(selected, design.panels.length - 1);
+    syncControls();
+    render();
+  }
+});
+
+document.addEventListener("keydown", (e) => {
+  const active = document.activeElement;
+  if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) return;
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+    e.preventDefault();
+    if (e.shiftKey) {
+      const next = history.redo(design);
+      if (next) {
+        design = next;
+        syncControls();
+        render();
+      }
+    } else {
+      const prev = history.undo(design);
+      if (prev) {
+        design = prev;
+        syncControls();
+        render();
       }
     }
-    if (files.length) {
-      render();
-      setStatus(`${files.length} photo(s) added.`);
-    }
-    e.target.value = "";
-  });
-
-  $("#fill-all").addEventListener("click", () => {
-    const src = design.panels[selected];
-    if (!src || src.photo < 0) {
-      setStatus("Select a panel with a photo first.");
-      return;
-    }
-    history.push(design);
-    const count = slotCount(design.layout);
-    for (let i = 0; i < count; i++) {
-      design.panels[i] = { ...src };
-    }
-    render();
-    setStatus("All panels filled with the selected photo.");
-  });
-
-  $("#clear-panel").addEventListener("click", () => {
-    history.push(design);
-    design.panels[selected] = emptyPanel();
-    render();
-    setStatus(`Panel ${selected + 1} cleared.`);
-  });
-
-  const captionBefore = {};
-  for (const key of ["title", "subtitle", "badge"]) {
-    const input = $(`#${key}`);
-    input.addEventListener("focus", () => {
-      captionBefore[key] = design[key];
-    });
-    input.addEventListener("input", () => {
-      design[key] = input.value;
-      render();
-    });
-    input.addEventListener("change", () => {
-      const before = { ...design, [key]: captionBefore[key] ?? design[key] };
-      history.push(before);
-      design[key] = input.value;
-      render();
-    });
   }
+});
 
-  for (const key of ["grain", "vignette", "halftone"]) {
-    $(`#${key}`).addEventListener("change", (e) => {
-      history.push(design);
-      design[key] = e.target.checked;
-      render();
-    });
-  }
-
-  document.querySelectorAll("#aspects button").forEach((b) => {
-    b.addEventListener("click", () => {
-      aspect = b.dataset.aspect;
-      syncControls();
-      render();
-    });
-  });
-
-  $("#undo").addEventListener("click", doUndo);
-  $("#redo").addEventListener("click", doRedo);
-
-  $("#export-all").addEventListener("click", async () => {
-    setStatus("Exporting all 3 sizes…");
+exportAllBtn.addEventListener("click", async () => {
+  exportAllBtn.disabled = true;
+  try {
     const saved = await downloadAllSizes(design, photos, (name) => {
-      setStatus(`Exported ${name}…`);
+      setStatus(`Exported ${name}`);
     });
-    setStatus(saved.length ? `Exported ${saved.join(", ")}` : "Export failed.");
-  });
-
-  window.addEventListener("keydown", (e) => {
-    const tag = (e.target.tagName || "").toLowerCase();
-    if (tag === "input" || tag === "textarea") return;
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
-      e.preventDefault();
-      if (e.shiftKey) doRedo();
-      else doUndo();
-    }
-  });
-}
-
-function doUndo() {
-  const prev = history.undo(design);
-  if (!prev) return;
-  design = prev;
-  selected = clamp(selected, 0, slotCount(design.layout) - 1);
-  syncControls();
-  render();
-}
-
-function doRedo() {
-  const next = history.redo(design);
-  if (!next) return;
-  design = next;
-  selected = clamp(selected, 0, slotCount(design.layout) - 1);
-  syncControls();
-  render();
-}
+    setStatus(saved.length > 0 ? `Exported ${saved.join(", ")}` : "Export failed.");
+  } finally {
+    exportAllBtn.disabled = false;
+  }
+});
 
 async function init() {
   buildLayoutPicker();
   buildGradePicker();
   buildExportOne();
-  bindControls();
+  bindCaption(titleInput, "title");
+  bindCaption(subtitleInput, "subtitle");
+  bindCaption(badgeInput, "badge");
+  bindFinishToggle(grainInput, "grain");
+  bindFinishToggle(vignetteInput, "vignette");
+  bindFinishToggle(halftoneInput, "halftone");
 
-  const names = scene ? scene.photos : ["boulevard", "pier"];
-  for (const name of names) {
+  const sampleNames = scene ? scene.photos : ["boulevard", "pier"];
+  for (const name of sampleNames) {
     const img = await loadImage(`./samples/${name}.jpg`);
     if (img) photos.push(img);
   }
@@ -380,25 +404,26 @@ async function init() {
     design.title = scene.title;
     design.subtitle = scene.subtitle;
     design.badge = scene.badge;
+    if (PREVIEW[scene.aspect]) aspect = scene.aspect;
     normalisePanels(design);
-    if (scene.aspect in PREVIEW) aspect = scene.aspect;
     if (scene.shot === "cover") document.body.classList.add("shot-cover");
   }
 
-  await loadFonts();
+  const fontsDone = loadFonts();
+  const timeout = new Promise((resolve) => setTimeout(resolve, 2500));
+  await Promise.race([fontsDone, timeout]);
   syncControls();
   render();
 
-  if (scene) {
-    if (scene.autoexport) {
-      const size = parseExportSize(scene.autoexport);
-      if (size) {
-        await downloadCover(design, photos, size);
-        window.__exportTriggered = true;
-      }
+  if (scene && scene.autoexport) {
+    const size = parseExportSize(scene.autoexport);
+    if (size) {
+      const canvas = renderCoverCanvas(design, photos, size.w, size.h);
+      await downloadCover(canvas, size.w, size.h);
+      window.__exportTriggered = true;
     }
-    markReady();
   }
+  if (scene) markReady();
 }
 
 init();
