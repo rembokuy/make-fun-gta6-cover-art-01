@@ -1,172 +1,156 @@
-import { spawn } from "node:child_process";
-import { mkdirSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+// Minimal headless-Chrome driver over the DevTools protocol.
+// No dependencies: plain fetch for the HTTP endpoints and the
+// built-in WebSocket client for the debugger session.
 
-export const CHROME =
-  process.env.CHROME_PATH ||
-  join(homedir(), ".cache/ms-playwright/chromium-1255/chrome-linux64/chrome");
+import { spawn } from 'node:child_process';
+import { existsSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+export function findChrome() {
+  const candidates = [
+    process.env.CHROME_BIN,
+    join(process.env.HOME ?? '', '.cache/ms-playwright/chromium-1255/chrome-linux64/chrome'),
+    '/usr/bin/google-chrome',
+    '/usr/bin/chromium',
+    '/opt/meta-chromium/chrome',
+  ].filter(Boolean);
+  for (const path of candidates) {
+    if (existsSync(path)) return path;
+  }
+  throw new Error('no Chrome binary found; set CHROME_BIN');
+}
+
+async function waitHttp(url, tries = 40) {
+  for (let i = 0; i < tries; i++) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) return true;
+    } catch { /* not up yet */ }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return false;
+}
+
+export async function launchChrome(debugPort) {
+  const chrome = findChrome();
+  const profile = mkdtempSync(join(tmpdir(), 'neon-coast-chrome-'));
+  const proc = spawn(chrome, [
+    '--headless=new',
+    '--no-sandbox',
+    '--disable-gpu',
+    '--hide-scrollbars',
+    '--force-device-scale-factor=1',
+    '--remote-debugging-port=' + debugPort,
+    '--user-data-dir=' + profile,
+    'about:blank',
+  ], { stdio: 'ignore' });
+  const up = await waitHttp('http://127.0.0.1:' + debugPort + '/json/version');
+  if (!up) {
+    proc.kill('SIGKILL');
+    throw new Error('Chrome did not open its DevTools port');
+  }
+  return proc;
 }
 
 export class Cdp {
-  constructor(ws, proc) {
-    this.ws = ws;
-    this.proc = proc;
-    this.nextId = 0;
+  constructor(wsUrl) {
+    this.ws = new WebSocket(wsUrl);
+    this.nextId = 1;
     this.pending = new Map();
-    this.exceptions = [];
-    this.consoleErrors = [];
-    this.externalRequests = [];
-    ws.onmessage = (event) => {
-      let msg;
-      try {
-        msg = JSON.parse(event.data);
-      } catch {
-        return;
-      }
+    this.listeners = new Map();
+    this.ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
       if (msg.id !== undefined && this.pending.has(msg.id)) {
         const { resolve, reject } = this.pending.get(msg.id);
         this.pending.delete(msg.id);
-        if (msg.error) reject(new Error(msg.error.message || "CDP error"));
+        if (msg.error) reject(new Error(msg.error.message));
         else resolve(msg.result);
-        return;
-      }
-      if (msg.method === "Runtime.exceptionThrown") {
-        this.exceptions.push(msg.params?.exceptionDetails?.text || "exception");
-      } else if (msg.method === "Runtime.consoleAPICalled") {
-        if (msg.params?.type === "error") {
-          this.consoleErrors.push(
-            (msg.params.args || []).map((a) => a.value ?? a.description ?? "").join(" ")
-          );
-        }
-      } else if (msg.method === "Network.requestWillBeSent") {
-        const url = msg.params?.request?.url || "";
-        try {
-          const host = new URL(url).hostname;
-          if (host !== "localhost" && host !== "127.0.0.1") {
-            this.externalRequests.push(url);
-          }
-        } catch {
-          // Ignore unparseable URLs.
-        }
+      } else if (msg.method) {
+        const list = this.listeners.get(msg.method) ?? [];
+        for (const fn of list) fn(msg.params ?? {});
       }
     };
   }
 
+  static async open(debugPort) {
+    const res = await fetch('http://127.0.0.1:' + debugPort + '/json/new?url=' + encodeURIComponent('about:blank'), { method: 'PUT' });
+    const target = await res.json();
+    const ws = new Cdp(target.webSocketDebuggerUrl);
+    await new Promise((resolve, reject) => {
+      ws.ws.onopen = resolve;
+      ws.ws.onerror = reject;
+    });
+    return ws;
+  }
+
+  async navigate(url) {
+    await this.send('Page.navigate', { url });
+  }
+
   send(method, params = {}) {
+    const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      const id = ++this.nextId;
       this.pending.set(id, { resolve, reject });
       this.ws.send(JSON.stringify({ id, method, params }));
     });
   }
 
+  on(method, fn) {
+    const list = this.listeners.get(method) ?? [];
+    list.push(fn);
+    this.listeners.set(method, list);
+  }
+
+  waitFor(method, predicate, timeoutMs = 15000) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('timed out waiting for ' + method)), timeoutMs);
+      this.on(method, (params) => {
+        if (!predicate || predicate(params)) {
+          clearTimeout(timer);
+          resolve(params);
+        }
+      });
+    });
+  }
+
   async evaluate(expression) {
-    const result = await this.send("Runtime.evaluate", {
+    const result = await this.send('Runtime.evaluate', {
       expression,
-      returnByValue: true,
       awaitPromise: true,
+      returnByValue: true,
     });
-    return result?.result?.value;
-  }
-
-  async waitFor(expression, timeout = 30000) {
-    const started = Date.now();
-    while (Date.now() - started < timeout) {
-      try {
-        if (await this.evaluate(expression)) return true;
-      } catch {
-        // Keep polling until the timeout.
-      }
-      await sleep(200);
+    if (result.exceptionDetails) {
+      throw new Error('page threw: ' + JSON.stringify(result.exceptionDetails.exception?.description ?? result.exceptionDetails.text));
     }
-    return false;
+    return result.result?.value;
   }
 
-  navigate(url) {
-    return this.send("Page.navigate", { url });
-  }
-
-  setViewport(w, h) {
-    return this.send("Emulation.setDeviceMetricsOverride", {
-      width: w,
-      height: h,
-      deviceScaleFactor: 1,
-      mobile: false,
-    });
-  }
-
-  async screenshot(quality) {
-    const result = await this.send("Page.captureScreenshot", { format: "jpeg", quality });
-    return Buffer.from(result.data, "base64");
-  }
-
-  async enable() {
-    await this.send("Page.enable");
-    await this.send("Runtime.enable");
-    await this.send("Network.enable");
+  async screenshot(format = 'jpeg', quality = 80) {
+    const shot = await this.send('Page.captureScreenshot', { format, quality });
+    return Buffer.from(shot.data, 'base64');
   }
 
   close() {
-    try {
-      this.ws.close();
-    } catch {
-      // Already closed.
-    }
-    try {
-      this.proc.kill("SIGKILL");
-    } catch {
-      // Already dead.
-    }
+    try { this.ws.close(); } catch { /* already closed */ }
   }
 }
 
-export async function launchChromium({ port, userDataDir, width, height }) {
-  mkdirSync(userDataDir, { recursive: true });
-  const proc = spawn(CHROME, [
-    "--headless=new",
-    "--no-sandbox",
-    "--disable-gpu",
-    "--hide-scrollbars",
-    `--remote-debugging-port=${port}`,
-    `--user-data-dir=${userDataDir}`,
-    `--window-size=${width},${height}`,
-    "about:blank",
-  ], { stdio: "ignore" });
-
-  let version = null;
-  for (let i = 0; i < 40; i++) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/json/version`);
-      if (res.ok) {
-        version = await res.json();
-        break;
-      }
-    } catch {
-      // Not up yet.
-    }
-    await sleep(250);
-  }
-  if (!version) {
-    proc.kill("SIGKILL");
-    throw new Error(`Chromium did not start on port ${port}`);
-  }
-  const listRes = await fetch(`http://127.0.0.1:${port}/json/list`);
-  const targets = await listRes.json();
-  const page = targets.find((t) => t.type === "page");
-  if (!page) {
-    proc.kill("SIGKILL");
-    throw new Error("No page target found");
-  }
-  const ws = new WebSocket(page.webSocketDebuggerUrl);
-  await new Promise((resolve, reject) => {
-    ws.onopen = resolve;
-    ws.onerror = reject;
+export async function startServer(repoDir, port) {
+  const proc = spawn(process.execPath, ['serve.ts'], {
+    cwd: repoDir,
+    env: { ...process.env, PORT: String(port) },
+    stdio: 'ignore',
   });
-  const cdp = new Cdp(ws, proc);
-  await cdp.enable();
-  return cdp;
+  const up = await waitHttp('http://127.0.0.1:' + port + '/');
+  if (!up) {
+    proc.kill('SIGKILL');
+    throw new Error('dev server did not come up on port ' + port);
+  }
+  return proc;
+}
+
+export function stop(proc) {
+  if (!proc || proc.exitCode !== null) return;
+  proc.kill('SIGTERM');
 }

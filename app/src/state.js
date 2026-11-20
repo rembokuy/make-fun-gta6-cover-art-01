@@ -1,66 +1,41 @@
-import { slotCount } from "./layouts.js";
+// Studio state for Neon Coast Cover Studio.
+// One plain object holds everything the cover needs, and a small
+// history stack makes every change undoable.
 
-export const MAX_PANELS = 9;
+export const DEFAULT_TITLE = 'NEON COAST';
+export const DEFAULT_TAGLINE = 'A VICE CITY STORY';
 
-export function emptyPanel() {
-  return { photo: -1, zoom: 1, ox: 0, oy: 0 };
-}
-
-export function freshDesign(photoCount) {
-  const panels = [];
-  for (let i = 0; i < MAX_PANELS; i++) {
-    const panel = emptyPanel();
-    if (photoCount > 0) panel.photo = i % photoCount;
-    panels.push(panel);
-  }
+export function freshState() {
   return {
-    panels,
-    layout: "four",
-    grade: "vice",
-    title: "SUNSET HEIST",
-    subtitle: "a neon coast story",
-    badge: "NEON COAST",
-    grain: true,
-    vignette: true,
-    halftone: true,
+    photo: 0,
+    layout: 'sunset-stack',
+    palette: 'coral-dusk',
+    title: DEFAULT_TITLE,
+    tagline: DEFAULT_TAGLINE,
   };
 }
 
-export function snapshot(design) {
-  return JSON.parse(JSON.stringify(design));
+export function snapshot(state) {
+  return JSON.parse(JSON.stringify(state));
 }
 
-export function normalisePanels(design) {
-  const want = slotCount(design.layout);
-  while (design.panels.length < want) design.panels.push(emptyPanel());
-  if (design.panels.length > want) design.panels.length = want;
-  return design;
-}
-
-export function createHistory(limit = 60) {
-  const past = [];
-  const future = [];
+export function createHistory(limit) {
+  const stack = [];
+  const max = typeof limit === 'number' && limit > 0 ? limit : 40;
   return {
-    push(design) {
-      past.push(snapshot(design));
-      if (past.length > limit) past.shift();
-      future.length = 0;
+    push(state) {
+      stack.push(snapshot(state));
+      while (stack.length > max) stack.shift();
+    },
+    canUndo() {
+      return stack.length > 0;
     },
     undo(current) {
-      if (past.length === 0) return null;
-      future.push(snapshot(current));
-      return past.pop();
+      if (stack.length === 0) return current;
+      return stack.pop();
     },
-    redo(current) {
-      if (future.length === 0) return null;
-      past.push(snapshot(current));
-      return future.pop();
-    },
-    get canUndo() {
-      return past.length > 0;
-    },
-    get canRedo() {
-      return future.length > 0;
+    depth() {
+      return stack.length;
     },
   };
 }

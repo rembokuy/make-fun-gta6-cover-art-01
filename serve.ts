@@ -1,75 +1,46 @@
-import { createReadStream, existsSync, statSync } from "node:fs";
-import { createServer } from "node:http";
-import { extname, join, normalize, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+// Tiny development server: serves the files under app/ on localhost.
+// Static only, no uploads, no network calls of its own.
 
-const root = resolve(fileURLToPath(new URL("./app", import.meta.url)));
+import { createServer } from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { join, extname, normalize } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const MIME = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".mjs": "text/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".json": "application/json; charset=utf-8",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".webp": "image/webp",
-  ".svg": "image/svg+xml",
-  ".ico": "image/x-icon",
-  ".woff2": "font/woff2",
-  ".woff": "font/woff",
-  ".ttf": "font/ttf",
-  ".otf": "font/otf",
-  ".bin": "application/octet-stream",
-  ".wasm": "application/wasm",
-  ".wav": "audio/wav",
-  ".mp3": "audio/mpeg",
-  ".ogg": "audio/ogg",
-  ".txt": "text/plain; charset=utf-8",
+const root = join(fileURLToPath(new URL('.', import.meta.url)), 'app');
+
+const TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.woff2': 'font/woff2',
+  '.txt': 'text/plain; charset=utf-8',
 };
 
-let port = 8080;
-const portArg = process.argv.indexOf("--port");
-if (portArg >= 0) {
-  const value = Number(process.argv[portArg + 1]);
-  if (!Number.isInteger(value) || value < 1 || value > 65535) {
-    console.error("Usage: node serve.ts [--port N]  (N must be 1..65535)");
-    process.exit(1);
-  }
-  port = value;
-}
-
-const server = createServer((req, res) => {
+const server = createServer(async (req, res) => {
   try {
-    const url = new URL(req.url || "/", "http://127.0.0.1");
-    let pathname = decodeURIComponent(url.pathname);
-    if (pathname.endsWith("/")) pathname += "index.html";
-    const filePath = resolve(join(root, normalize(pathname)));
-    if (filePath !== root && !filePath.startsWith(root + sep)) {
-      res.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
-      res.end("Forbidden\n");
+    const path = decodeURIComponent(new URL(req.url ?? '/', 'http://localhost').pathname);
+    const rel = normalize(path === '/' ? 'index.html' : path.replace(/^\/+/, ''));
+    const file = join(root, rel);
+    if (!file.startsWith(root)) {
+      res.writeHead(403);
+      res.end('forbidden');
       return;
     }
-    if (!existsSync(filePath) || !statSync(filePath).isFile()) {
-      res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
-      res.end("Not found\n");
-      return;
-    }
-    const size = statSync(filePath).size;
-    res.writeHead(200, {
-      "content-type": MIME[extname(filePath).toLowerCase()] || "application/octet-stream",
-      "content-length": size,
-      "cache-control": "no-store",
-    });
-    createReadStream(filePath).pipe(res);
-  } catch (err) {
-    res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
-    res.end("Internal error\n");
+    const body = await readFile(file);
+    res.writeHead(200, { 'content-type': TYPES[extname(file)] ?? 'application/octet-stream' });
+    res.end(body);
+  } catch {
+    res.writeHead(404);
+    res.end('not found');
   }
 });
 
-server.listen(port, "127.0.0.1", () => {
-  console.log(`Neon Coast Cover Studio serving app/ at http://127.0.0.1:${port}`);
+const port = Number(process.env.PORT ?? 8080);
+server.listen(port, () => {
+  console.log('Neon Coast Cover Studio at http://localhost:' + port);
 });
